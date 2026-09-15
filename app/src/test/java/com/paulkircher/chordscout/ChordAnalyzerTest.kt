@@ -1,6 +1,7 @@
 package com.paulkircher.chordscout
 
 import com.paulkircher.chordscout.dsp.ChordAnalyzer
+import com.paulkircher.chordscout.dsp.ChromaExtractor
 import com.paulkircher.chordscout.model.GuitarChordLibrary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -68,5 +69,45 @@ class ChordAnalyzerTest {
         val chords = result.segments.map { it.chord }
         assertTrue("Progression should include C", chords.contains("C"))
         assertTrue("Progression should include G", chords.contains("G"))
+    }
+
+    @Test
+    fun testChromaExtractorIncludesExactWindow() {
+        val windowSize = 2048
+        val sampleRate = 22050
+        val pcm = FloatArray(windowSize) { sampleIndex ->
+            sin(2.0 * PI * 261.63 * sampleIndex / sampleRate).toFloat()
+        }
+
+        val chromagram = ChromaExtractor(sampleRate = sampleRate, windowSize = windowSize, hopSize = 1024)
+            .extractChromagram(pcm)
+
+        assertEquals(1, chromagram.size)
+    }
+
+    @Test
+    fun testAnalyzePreservesQuickChordChanges() {
+        val sampleRate = 22050
+        val chordDuration = 0.25f
+        val notesByChord = listOf(
+            "C" to doubleArrayOf(261.63, 329.63, 392.00),
+            "G" to doubleArrayOf(196.00, 246.94, 293.66),
+            "Am" to doubleArrayOf(220.00, 261.63, 329.63),
+            "F" to doubleArrayOf(174.61, 220.00, 261.63),
+        )
+        val samplesPerChord = (sampleRate * chordDuration).toInt()
+        val pcm = FloatArray(samplesPerChord * notesByChord.size)
+
+        notesByChord.forEachIndexed { chordIndex, (_, notes) ->
+            for (sampleIndex in 0 until samplesPerChord) {
+                val time = sampleIndex.toDouble() / sampleRate
+                pcm[chordIndex * samplesPerChord + sampleIndex] =
+                    notes.sumOf { frequency -> sin(2.0 * PI * frequency * time) }.toFloat() / notes.size
+            }
+        }
+
+        val result = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+
+        assertEquals(notesByChord.map { it.first }, result.segments.map { it.chord })
     }
 }

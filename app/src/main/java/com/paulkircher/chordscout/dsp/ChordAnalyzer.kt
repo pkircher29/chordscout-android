@@ -162,7 +162,7 @@ object ChordAnalyzer {
         }
 
         onProgress(0.85f, "Consolidating segments...")
-        val smoothed = mergeAndSmooth(rawSegments, totalSec, minSegmentDuration = 0.4f)
+        val smoothed = mergeAndSmooth(rawSegments, totalSec, minSegmentDuration = 0.1f)
 
         onProgress(1.0f, "Done")
         val metadata = SongMetadata(

@@ -21,8 +21,8 @@ class ChromaExtractor(
      * Returns List of FloatArray (each of size 12).
      */
     fun extractChromagram(pcm: FloatArray): List<FloatArray> {
-        val numFrames = (pcm.size - windowSize) / hopSize
-        if (numFrames <= 0) return emptyList()
+        if (pcm.size < windowSize) return emptyList()
+        val numFrames = 1 + (pcm.size - windowSize) / hopSize
 
         val chromagram = ArrayList<FloatArray>(numFrames)
         val real = FloatArray(windowSize)
