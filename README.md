@@ -62,6 +62,13 @@ com.paulkircher.chordscout
 - Gradle 8.11.1 (via included wrapper)
 
 ### Build Debug APK
+
+For a GitHub build, open **Actions → Android Debug APK → Run workflow**.
+The workflow also runs for pushes and pull requests to `main`. Successful runs
+provide a `chordscout-android-debug-<run number>` artifact containing the debug APK
+(retained for 30 days), plus unit-test reports. Download and unzip the artifact
+to install the APK. This is a debug build, not a Play Store release.
+
 ```bash
 ./gradlew assembleDebug
 ```
