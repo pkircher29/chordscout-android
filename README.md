@@ -11,10 +11,9 @@ Companion Android port of [ChordScout Desktop](https://github.com/pkircher29/Cho
 ## ✨ Features
 
 - **100% Local & Offline DSP:**
-  - Android `MediaExtractor` & `MediaCodec` asynchronous decoding directly to 32-bit floating-point PCM.
-  - In-place Radix-2 Cooley-Tukey FFT with Hanning windowing.
-  - 12-semitone pitch class chroma analysis across 5 octaves (C2 to B6, 65 Hz – 2000 Hz).
-  - Cosine-similarity chord template matching with temporal smoothing and key estimation.
+  - Android `MediaExtractor` & `MediaCodec` decoding to mono float PCM, including 16-bit and float decoder output, then an anti-aliased resample to 22.05 kHz.
+  - Constant-Q chromagram, one kernel per semitone from C2 to C7, so guitar harmonics are not over-weighted the way a raw FFT bin sum is.
+  - Cosine-similarity chord template matching. Confidence (0.35), silence RMS (0.015), hop (1024), and minimum segment length (0.10 s) match the desktop app. A 3-frame chroma median removes single-frame flicker.
 - **Studio Dark Aesthetic:**
   - **Rosewood Guitar Fretboard:** Hardware-accelerated canvas rendering with nickel frets, mother-of-pearl position inlays (3rd, 5th, 7th, 9th, 12th double-dot), brass/bronze wound strings, gold finger dot markers, and muted/open string status badges.
   - **Acoustic Strum Synthesizer:** Tap the fretboard or chord badge to hear a physical plucked-string Karplus-Strong / harmonic acoustic strum synthesized in real-time via `AudioTrack`.
@@ -36,11 +35,13 @@ Companion Android port of [ChordScout Desktop](https://github.com/pkircher29/Cho
 com.paulkircher.chordscout
 ├── dsp/
 │   ├── FastFourierTransform.kt  # Radix-2 Cooley-Tukey FFT
-│   ├── ChromaExtractor.kt       # 12-pitch chroma profile generator
-│   └── ChordAnalyzer.kt         # Template matching, key estimation & smoothing
+│   ├── ChromaExtractor.kt       # Constant-Q 12-pitch chromagram
+│   ├── ChordAnalyzer.kt         # Template matching, key estimation & smoothing
+│   └── GuitarSynth.kt           # Karplus-Strong acoustic guitar strum
 ├── audio/
 │   ├── AudioDecoder.kt          # MediaExtractor + MediaCodec to FloatArray
-│   └── GuitarSynth.kt           # Karplus-Strong acoustic guitar audio strum
+│   ├── PcmConvert.kt            # 16-bit and float PCM downmix
+│   └── PcmResampler.kt          # Anti-aliased resample to 22.05 kHz
 ├── ui/
 │   ├── theme/                   # Studio dark theme, Amber/Gold accents
 │   ├── RosewoodFretboard.kt     # Canvas-drawn guitar fretboard & markers
