@@ -3,6 +3,7 @@ package com.paulkircher.chordscout.dsp
 import com.paulkircher.chordscout.model.AnalysisResult
 import com.paulkircher.chordscout.model.ChordSegment
 import com.paulkircher.chordscout.model.SongMetadata
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -10,6 +11,17 @@ import kotlin.math.sqrt
 object ChordAnalyzer {
 
     val PITCH_NAMES = arrayOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+    /**
+     * Shared with desktop `analyze_chords`. These are not the Android miss:
+     * lowering them is what makes desktop report changes that are not there.
+     * Real guitar changes were dropped because the chromagram flickered, so
+     * a correct chord never lasted [MIN_SEGMENT_DURATION] and was absorbed.
+     */
+    const val CONFIDENCE_THRESHOLD = 0.35f
+    const val MIN_SEGMENT_DURATION = 0.10f
+    const val SILENCE_RMS_THRESHOLD = 0.015f
+    const val CHROMA_MEDIAN_WIDTH = 3
 
     // Krumhansl-Schmuckler key profiles
     private val MAJOR_PROFILE = floatArrayOf(6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f)
@@ -107,13 +119,22 @@ object ChordAnalyzer {
         sampleRate: Int = 22050,
         fileName: String = "Track",
         includeSevenths: Boolean = false,
+        confidenceThreshold: Float = CONFIDENCE_THRESHOLD,
+        minSegmentDuration: Float = MIN_SEGMENT_DURATION,
+        silenceRmsThreshold: Float = SILENCE_RMS_THRESHOLD,
+        chromaMedianWidth: Int = CHROMA_MEDIAN_WIDTH,
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): AnalysisResult {
         val totalSec = pcm.size.toFloat() / sampleRate
         onProgress(0.15f, "Extracting chromagram...")
 
+        // Desktop peak-normalizes before the log chroma. Without this, a quiet
+        // phone recording stays in the linear part of log1p and the loudest
+        // partial decides the chord.
+        peakNormalize(pcm)
+
         val extractor = ChromaExtractor(sampleRate = sampleRate, windowSize = 2048, hopSize = 1024)
-        val chromagram = extractor.extractChromagram(pcm)
+        val chromagram = medianSmoothChroma(extractor.extractChromagram(pcm), chromaMedianWidth)
 
         if (chromagram.isEmpty()) {
             val emptyMeta = SongMetadata(fileName, totalSec, sampleRate)
@@ -134,13 +155,18 @@ object ChordAnalyzer {
         val templateEntries = templates.entries.toList()
 
         val rawSegments = ArrayList<ChordSegment>(chromagram.size)
-        val dt = 1024f / sampleRate
+        val dt = extractor.hopSize.toFloat() / sampleRate
 
         for (i in chromagram.indices) {
             val tStart = i * dt
             val tEnd = min(totalSec, tStart + dt)
-            val chroma = chromagram[i]
+            val energy = frameRms(pcm, i * extractor.hopSize, extractor.windowSize)
+            if (energy < silenceRmsThreshold) {
+                rawSegments.add(ChordSegment(tStart, tEnd, "N", 1.0f))
+                continue
+            }
 
+            val chroma = chromagram[i]
             var bestScore = -1.0f
             var bestChord = "N"
 
@@ -156,13 +182,13 @@ object ChordAnalyzer {
                 }
             }
 
-            val finalChord = if (bestScore < 0.35f) "N" else bestChord
+            val finalChord = if (bestScore < confidenceThreshold) "N" else bestChord
             val conf = max(0.1f, min(1.0f, (bestScore - 0.2f) / 0.8f))
             rawSegments.add(ChordSegment(tStart, tEnd, finalChord, conf))
         }
 
         onProgress(0.85f, "Consolidating segments...")
-        val smoothed = mergeAndSmooth(rawSegments, totalSec, minSegmentDuration = 0.1f)
+        val smoothed = mergeAndSmooth(rawSegments, totalSec, minSegmentDuration = minSegmentDuration)
 
         onProgress(1.0f, "Done")
         val metadata = SongMetadata(
@@ -175,10 +201,64 @@ object ChordAnalyzer {
         return AnalysisResult(metadata, smoothed)
     }
 
+    private fun peakNormalize(pcm: FloatArray) {
+        var peak = 0f
+        for (sample in pcm) {
+            val magnitude = abs(sample)
+            if (magnitude > peak) peak = magnitude
+        }
+        if (peak < 1e-5f || abs(peak - 1f) < 1e-4f) return
+        val gain = 1f / peak
+        for (i in pcm.indices) pcm[i] *= gain
+    }
+
+    private fun frameRms(pcm: FloatArray, offset: Int, length: Int): Float {
+        val end = min(pcm.size, offset + length)
+        if (end <= offset) return 0f
+        var sum = 0.0
+        for (i in offset until end) {
+            val sample = pcm[i].toDouble()
+            sum += sample * sample
+        }
+        return sqrt(sum / (end - offset)).toFloat()
+    }
+
+    /**
+     * Time-median each chroma bin, then re-normalize. Width 3 matches desktop
+     * and removes single-frame label flips (~46 ms) without bridging a real
+     * change. Width 1 disables it.
+     */
+    private fun medianSmoothChroma(frames: List<FloatArray>, width: Int): List<FloatArray> {
+        if (width <= 1 || frames.size < 3) return frames
+        val radius = width / 2
+        val span = radius * 2 + 1
+        val window = FloatArray(span)
+        val smoothedFrames = ArrayList<FloatArray>(frames.size)
+        for (i in frames.indices) {
+            val smoothed = FloatArray(12)
+            for (bin in 0 until 12) {
+                for (k in -radius..radius) {
+                    val index = (i + k).coerceIn(0, frames.lastIndex)
+                    window[k + radius] = frames[index][bin]
+                }
+                window.sort()
+                smoothed[bin] = window[span / 2]
+            }
+            var normSq = 0f
+            for (bin in 0 until 12) normSq += smoothed[bin] * smoothed[bin]
+            val norm = sqrt(normSq)
+            if (norm > 1e-6f) {
+                for (bin in 0 until 12) smoothed[bin] /= norm
+            }
+            smoothedFrames.add(smoothed)
+        }
+        return smoothedFrames
+    }
+
     private fun mergeAndSmooth(
         raw: List<ChordSegment>,
         totalDuration: Float,
-        minSegmentDuration: Float = 0.4f,
+        minSegmentDuration: Float = MIN_SEGMENT_DURATION,
     ): List<ChordSegment> {
         if (raw.isEmpty()) return listOf(ChordSegment(0f, totalDuration, "N", 1.0f))
 

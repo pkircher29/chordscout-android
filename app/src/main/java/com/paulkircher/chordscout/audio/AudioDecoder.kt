@@ -1,6 +1,7 @@
 package com.paulkircher.chordscout.audio
 
 import android.content.Context
+import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -44,8 +45,13 @@ object AudioDecoder {
 
         extractor.selectTrack(audioTrackIndex)
         val mime = inputFormat.getString(MediaFormat.KEY_MIME)!!
-        val originalSampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val channelCount = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        var decodedSampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        var decodedChannels = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+        var pcmEncoding = if (inputFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+            inputFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+        } else {
+            AudioFormat.ENCODING_PCM_16BIT
+        }
         val durationUs = if (inputFormat.containsKey(MediaFormat.KEY_DURATION)) {
             inputFormat.getLong(MediaFormat.KEY_DURATION)
         } else {
@@ -92,7 +98,18 @@ object AudioDecoder {
                 }
 
                 val outputBufferId = codec.dequeueOutputBuffer(info, timeoutUs)
-                if (outputBufferId >= 0) {
+                if (outputBufferId == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val outputFormat = codec.outputFormat
+                    if (outputFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        decodedSampleRate = outputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    }
+                    if (outputFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                        decodedChannels = outputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+                    }
+                    if (outputFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                        pcmEncoding = outputFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                    }
+                } else if (outputBufferId >= 0) {
                     if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         sawOutputEOS = true
                     }
@@ -103,21 +120,14 @@ object AudioDecoder {
                         outputBuffer.limit(info.offset + info.size)
                         outputBuffer.order(ByteOrder.LITTLE_ENDIAN)
 
-                        val shortCount = info.size / 2
-                        val frameCount = shortCount / channelCount
-                        val monoChunk = FloatArray(frameCount)
-
-                        for (f in 0 until frameCount) {
-                            var sum = 0f
-                            for (c in 0 until channelCount) {
-                                val s = outputBuffer.short.toFloat() / 32768.0f
-                                sum += s
-                            }
-                            monoChunk[f] = sum / channelCount
+                        val convertEncoding = if (pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT) {
+                            PcmConvert.ENCODING_PCM_FLOAT
+                        } else {
+                            PcmConvert.ENCODING_PCM_16BIT
                         }
-
+                        val monoChunk = PcmConvert.toMono(outputBuffer, convertEncoding, decodedChannels)
                         pcmChunks.add(monoChunk)
-                        totalSamples += frameCount
+                        totalSamples += monoChunk.size
                     }
 
                     codec.releaseOutputBuffer(outputBufferId, false)
@@ -137,20 +147,8 @@ object AudioDecoder {
             offset += chunk.size
         }
 
-        // Resample if original sample rate differs from target (simple linear interpolation)
-        if (originalSampleRate != targetSampleRate && totalSamples > 0) {
-            val ratio = targetSampleRate.toDouble() / originalSampleRate.toDouble()
-            val targetLength = (totalSamples * ratio).toInt()
-            val resampled = FloatArray(targetLength)
-
-            for (i in 0 until targetLength) {
-                val srcIdx = i / ratio
-                val i0 = srcIdx.toInt()
-                val i1 = minOf(totalSamples - 1, i0 + 1)
-                val frac = (srcIdx - i0).toFloat()
-                resampled[i] = fullPcm[i0] * (1.0f - frac) + fullPcm[i1] * frac
-            }
-            return@withContext resampled
+        if (decodedSampleRate != targetSampleRate && totalSamples > 0) {
+            return@withContext PcmResampler.resample(fullPcm, decodedSampleRate, targetSampleRate)
         }
 
         return@withContext fullPcm

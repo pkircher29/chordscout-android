@@ -8,7 +8,10 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.PI
+import kotlin.math.exp
+import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 class ChordAnalyzerTest {
 
@@ -109,5 +112,137 @@ class ChordAnalyzerTest {
         val result = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
 
         assertEquals(notesByChord.map { it.first }, result.segments.map { it.chord })
+    }
+
+    @Test
+    fun testChromaOfC4PeaksOnC() {
+        val sampleRate = 22050
+        val pcm = FloatArray(sampleRate / 2) { sampleIndex ->
+            sin(2.0 * PI * 261.63 * sampleIndex / sampleRate).toFloat()
+        }
+
+        val chromagram = ChromaExtractor(sampleRate = sampleRate).extractChromagram(pcm)
+        val mean = FloatArray(12)
+        for (frame in chromagram) {
+            for (pitch in 0 until 12) mean[pitch] += frame[pitch]
+        }
+        val loudest = mean.indices.maxBy { mean[it] }
+        assertEquals(0, loudest)
+    }
+
+    @Test
+    fun testHarmonicOpenFStaysF() {
+        // Bright open F used to tie with Am: high FFT bins pile the 5th harmonic
+        // (a major third) into the minor triad, the label flickers, and the
+        // smoother deletes the real chord.
+        val sampleRate = 22050
+        val pcm = synthGuitarChord(
+            midiNotes = intArrayOf(41, 45, 48, 53, 57, 60),
+            sampleCount = (sampleRate * 1.6f).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 15.0,
+        )
+        val result = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+        val voiced = result.segments.filter { it.chord != "N" }
+
+        assertEquals(listOf("F"), voiced.map { it.chord })
+        val covered = voiced.sumOf { it.duration.toDouble() }
+        assertTrue("F should cover the strum, covered=$covered", covered > 1.2)
+    }
+
+    @Test
+    fun testHarmonicProgressionKeepsEachChange() {
+        val sampleRate = 22050
+        val chordSeconds = 0.55f
+        val notes = listOf(
+            "C" to intArrayOf(48, 52, 55, 60, 64),
+            "G" to intArrayOf(43, 47, 50, 55, 59, 67),
+            "Am" to intArrayOf(45, 52, 57, 60, 64),
+            "F" to intArrayOf(41, 45, 48, 53, 57, 60),
+        )
+        val pcm = concatChords(notes.map { it.second }, sampleRate, chordSeconds, detuneCents = 12.0)
+        val result = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+
+        assertEquals(notes.map { it.first }, result.segments.map { it.chord }.filter { it != "N" })
+    }
+
+    @Test
+    fun testShortBurstDoesNotCreateAChange() {
+        val sampleRate = 22050
+        val pcm = synthGuitarChord(
+            midiNotes = intArrayOf(48, 52, 55, 60, 64),
+            sampleCount = (sampleRate * 2.0f).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 8.0,
+        )
+        val burst = synthGuitarChord(
+            midiNotes = intArrayOf(43, 47, 50, 55, 59, 67),
+            sampleCount = (sampleRate * 0.05f).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 8.0,
+        )
+        val at = sampleRate
+        for (i in burst.indices) pcm[at + i] = burst[i]
+
+        val result = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+        assertEquals(listOf("C"), result.segments.map { it.chord }.filter { it != "N" })
+    }
+
+    @Test
+    fun testConfidenceThresholdCanRejectEverything() {
+        val sampleRate = 22050
+        val pcm = FloatArray(sampleRate) { sampleIndex ->
+            sin(2.0 * PI * 261.63 * sampleIndex / sampleRate).toFloat()
+        }
+        val result = ChordAnalyzer.analyze(
+            pcm,
+            sampleRate = sampleRate,
+            confidenceThreshold = 0.99f,
+        )
+        assertEquals(listOf("N"), result.segments.map { it.chord })
+    }
+
+    private fun concatChords(
+        chords: List<IntArray>,
+        sampleRate: Int,
+        chordSeconds: Float,
+        detuneCents: Double,
+    ): FloatArray {
+        val samplesPerChord = (sampleRate * chordSeconds).toInt()
+        val pcm = FloatArray(samplesPerChord * chords.size)
+        chords.forEachIndexed { index, notes ->
+            val chord = synthGuitarChord(notes, samplesPerChord, sampleRate, detuneCents + index)
+            chord.copyInto(pcm, index * samplesPerChord)
+        }
+        return pcm
+    }
+
+    private fun synthGuitarChord(
+        midiNotes: IntArray,
+        sampleCount: Int,
+        sampleRate: Int,
+        detuneCents: Double,
+    ): FloatArray {
+        val pcm = FloatArray(sampleCount)
+        midiNotes.forEachIndexed { stringIndex, midi ->
+            val cents = detuneCents + (stringIndex - 2.5) * 4.0
+            val fundamental = 440.0 * 2.0.pow((midi - 69) / 12.0) * 2.0.pow(cents / 1200.0)
+            val delay = (0.012 * stringIndex * sampleRate).toInt()
+            for (sampleIndex in delay until sampleCount) {
+                val time = sampleIndex.toDouble() / sampleRate
+                val envelope = exp(-1.5 * time)
+                var partial = 0.0
+                var harmonic = 1
+                while (harmonic <= 28) {
+                    val frequency = fundamental * harmonic * sqrt(1.0 + 0.00012 * harmonic * harmonic)
+                    if (frequency >= sampleRate / 2.0 - 30) break
+                    val phase = stringIndex * 0.7 + harmonic * 0.35
+                    partial += harmonic.toDouble().pow(-0.45) * sin(2.0 * PI * frequency * time + phase)
+                    harmonic++
+                }
+                pcm[sampleIndex] += (partial * envelope).toFloat()
+            }
+        }
+        return pcm
     }
 }
