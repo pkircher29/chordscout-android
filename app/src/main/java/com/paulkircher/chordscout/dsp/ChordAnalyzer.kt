@@ -23,6 +23,17 @@ object ChordAnalyzer {
     const val SILENCE_RMS_THRESHOLD = 0.015f
     const val CHROMA_MEDIAN_WIDTH = 3
 
+    /**
+     * Once a chord has lasted [MIN_SEGMENT_DURATION], a challenger must beat
+     * it by this much. Desktop uses 0.05. On this chromagram 0.05 also blocks
+     * a real F after Am, so the default is a step smaller. Zero is frame-by-frame
+     * argmax. The hold lets go when the current chord falls under
+     * [CONFIDENCE_THRESHOLD] or the frame is silent. It does not start during
+     * the attack, or a slightly-off first frame (open E scored as Em) gets glued
+     * on for the whole chord.
+     */
+    const val CHANGE_MARGIN = 0.03f
+
     // Krumhansl-Schmuckler key profiles
     private val MAJOR_PROFILE = floatArrayOf(6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f)
     private val MINOR_PROFILE = floatArrayOf(6.33f, 2.68f, 3.52f, 5.38f, 2.60f, 3.53f, 2.54f, 4.75f, 3.98f, 2.69f, 3.34f, 3.17f)
@@ -123,8 +134,7 @@ object ChordAnalyzer {
         minSegmentDuration: Float = MIN_SEGMENT_DURATION,
         silenceRmsThreshold: Float = SILENCE_RMS_THRESHOLD,
         chromaMedianWidth: Int = CHROMA_MEDIAN_WIDTH,
-        guitarFocusMidiLow: Int = ChromaExtractor.FOCUS_MIDI_LOW,
-        guitarFocusMidiHigh: Int = ChromaExtractor.FOCUS_MIDI_HIGH,
+        changeMargin: Float = CHANGE_MARGIN,
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): AnalysisResult {
         val totalSec = pcm.size.toFloat() / sampleRate
@@ -135,17 +145,7 @@ object ChordAnalyzer {
         // partial decides the chord.
         peakNormalize(pcm)
 
-        // Desktop separates drums with HPSS, then scores every semitone from C2 up.
-        // That still hears bass, keys, and vocals. Taper C2–D3 so bass harmonics
-        // do not vote with the fretted chord. Leave the top of the bank alone.
-        // The MIDI window is an analyze() argument so a device pass can nudge it.
-        val extractor = ChromaExtractor(
-            sampleRate = sampleRate,
-            windowSize = 2048,
-            hopSize = 1024,
-            focusMidiLow = guitarFocusMidiLow,
-            focusMidiHigh = guitarFocusMidiHigh,
-        )
+        val extractor = ChromaExtractor(sampleRate = sampleRate, windowSize = 2048, hopSize = 1024)
         val chromagram = medianSmoothChroma(extractor.extractChromagram(pcm), chromaMedianWidth)
 
         if (chromagram.isEmpty()) {
@@ -168,12 +168,16 @@ object ChordAnalyzer {
 
         val rawSegments = ArrayList<ChordSegment>(chromagram.size)
         val dt = extractor.hopSize.toFloat() / sampleRate
+        var heldChord: String? = null
+        var heldFrames = 0
 
         for (i in chromagram.indices) {
             val tStart = i * dt
             val tEnd = min(totalSec, tStart + dt)
             val energy = frameRms(pcm, i * extractor.hopSize, extractor.windowSize)
             if (energy < silenceRmsThreshold) {
+                heldChord = null
+                heldFrames = 0
                 rawSegments.add(ChordSegment(tStart, tEnd, "N", 1.0f))
                 continue
             }
@@ -181,6 +185,7 @@ object ChordAnalyzer {
             val chroma = chromagram[i]
             var bestScore = -1.0f
             var bestChord = "N"
+            var heldScore = -1.0f
 
             for (entry in templateEntries) {
                 var dot = 0.0f
@@ -188,15 +193,36 @@ object ChordAnalyzer {
                 for (p in 0 until 12) {
                     dot += chroma[p] * tVec[p]
                 }
+                if (entry.key == heldChord) heldScore = dot
                 if (dot > bestScore) {
                     bestScore = dot
                     bestChord = entry.key
                 }
             }
 
-            val finalChord = if (bestScore < confidenceThreshold) "N" else bestChord
-            val conf = max(0.1f, min(1.0f, (bestScore - 0.2f) / 0.8f))
-            rawSegments.add(ChordSegment(tStart, tEnd, finalChord, conf))
+            if (bestScore < confidenceThreshold) {
+                heldChord = null
+                heldFrames = 0
+                rawSegments.add(ChordSegment(tStart, tEnd, "N", 0.5f))
+                continue
+            }
+            val locked = heldChord != null && heldFrames * dt >= minSegmentDuration
+            val release = heldChord == null ||
+                bestChord == heldChord ||
+                heldScore < confidenceThreshold ||
+                !locked ||
+                changeMargin <= 0f ||
+                bestScore >= heldScore + changeMargin
+            if (release && bestChord != heldChord) {
+                heldChord = bestChord
+                heldScore = bestScore
+                heldFrames = 1
+            } else {
+                if (bestChord == heldChord) heldScore = bestScore
+                heldFrames++
+            }
+            val conf = max(0.1f, min(1.0f, (heldScore - 0.2f) / 0.8f))
+            rawSegments.add(ChordSegment(tStart, tEnd, heldChord!!, conf))
         }
 
         onProgress(0.85f, "Consolidating segments...")

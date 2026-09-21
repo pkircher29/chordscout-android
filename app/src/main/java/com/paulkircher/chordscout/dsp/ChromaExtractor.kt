@@ -16,14 +16,8 @@ import kotlin.math.sqrt
  * harmonics contribute many more bins than the fundamentals. Those partials
  * (especially the 5th, a major third) fill in a *different* triad — open F then
  * ties with Am, the frame label flickers, and the segment smoother deletes the
- * real change. A constant-Q kernel gives every semitone the same resolution, which
- * is what the desktop app gets from `librosa.chroma_cqt`.
- *
- * Equal resolution is not equal musical weight. A bass note below the guitar
- * still paints the chroma through its first harmonics, and those land on C2–D3
- * at the same strength as a fretted chord tone. [guitarFocusWeight] tapers that
- * register before the twelve pitch classes are folded. The top of the bank stays
- * at full weight: rolling it off made minor chords look major.
+ * real change. A constant-Q kernel gives every semitone the same weight, which is
+ * what the desktop app gets from `librosa.chroma_cqt`.
  *
  * Frame rate stays [hopSize] samples so chord timing matches the desktop hop.
  */
@@ -31,14 +25,9 @@ class ChromaExtractor(
     val sampleRate: Int = 22050,
     val windowSize: Int = 2048,
     val hopSize: Int = 1024,
-    val focusMidiLow: Int = FOCUS_MIDI_LOW,
-    val focusMidiHigh: Int = FOCUS_MIDI_HIGH,
-    val focusLowFade: Int = FOCUS_LOW_FADE,
-    val focusHighFade: Int = FOCUS_HIGH_FADE,
 ) {
     private class Kernel(
         val pitchClass: Int,
-        val weight: Float,
         val real: FloatArray,
         val imag: FloatArray,
     )
@@ -77,9 +66,7 @@ class ChromaExtractor(
                     imag[i] = (imag[i] / norm).toFloat()
                 }
             }
-            val weight = guitarFocusWeight(midi, focusMidiLow, focusMidiHigh, focusLowFade, focusHighFade)
-            if (weight < 0.02f) continue
-            built.add(Kernel(midi % 12, weight, real, imag))
+            built.add(Kernel(midi % 12, real, imag))
         }
         kernels = built
     }
@@ -111,7 +98,7 @@ class ChromaExtractor(
                     im += kernel.imag[index] * value
                     index++
                 }
-                chroma[kernel.pitchClass] += sqrt(re * re + im * im).toFloat() * kernel.weight
+                chroma[kernel.pitchClass] += sqrt(re * re + im * im).toFloat()
             }
 
             var normSq = 0.0f
@@ -133,35 +120,5 @@ class ChromaExtractor(
         const val MIDI_LOW = 36 // C2
         const val MIDI_HIGH = 96 // C7
         const val MAX_KERNEL_SECONDS = 0.30
-
-        /**
-         * Full weight from D3 up. Below D3 a bass note's first harmonics are tapered
-         * so they do not vote with the fretted chord. The top of the bank stays
-         * at full weight: rolling it off made minor chords look major.
-         */
-        const val FOCUS_MIDI_LOW = 50
-        const val FOCUS_MIDI_HIGH = 96
-        const val FOCUS_LOW_FADE = 14
-        const val FOCUS_HIGH_FADE = 14
-
-        /**
-         * 1 from [fullLow] through [fullHigh]. Weight rises across [lowFade]
-         * semitones below that, and would fall across [highFade] semitones above
-         * [fullHigh]. The default high edge is the top kernel, so only the bass
-         * taper is active unless a caller lowers the high edge.
-         */
-        fun guitarFocusWeight(
-            midi: Int,
-            fullLow: Int = FOCUS_MIDI_LOW,
-            fullHigh: Int = FOCUS_MIDI_HIGH,
-            lowFade: Int = FOCUS_LOW_FADE,
-            highFade: Int = FOCUS_HIGH_FADE,
-        ): Float {
-            if (lowFade <= 0 && midi < fullLow) return 0f
-            if (highFade <= 0 && midi > fullHigh) return 0f
-            val below = if (lowFade <= 0) 1f else ((midi - (fullLow - lowFade)).toFloat() / lowFade).coerceIn(0f, 1f)
-            val above = if (highFade <= 0) 1f else (((fullHigh + highFade) - midi).toFloat() / highFade).coerceIn(0f, 1f)
-            return below * above
-        }
     }
 }

@@ -2,9 +2,9 @@ package com.paulkircher.chordscout
 
 import com.paulkircher.chordscout.dsp.ChordAnalyzer
 import com.paulkircher.chordscout.dsp.ChromaExtractor
+import com.paulkircher.chordscout.model.ChordSegment
 import com.paulkircher.chordscout.model.GuitarChordLibrary
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -168,6 +168,39 @@ class ChordAnalyzerTest {
     }
 
     @Test
+    fun testNearTieDoesNotFlipUntilItClearsTheMargin() {
+        // A power chord has no third, so G and Gm trade the top score. Without
+        // a margin the chart flickers. With the default margin the sustain is
+        // one chord; changeMargin = 0 brings the flicker back.
+        val sampleRate = 22050
+        val power = synthGuitarChord(
+            midiNotes = intArrayOf(43, 50, 55, 62),
+            sampleCount = (sampleRate * 3.0f).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 8.0,
+        )
+        val flicker = synthFlickerThird(sampleRate)
+
+        val powerRaw = voiced(power, changeMargin = 0f)
+        val flickerRaw = voiced(flicker, changeMargin = 0f)
+        assertTrue("power chord should flicker with no margin, got $powerRaw", powerRaw.count { it.duration >= 0.2f } >= 2)
+        assertTrue("weak-third alternation should flicker with no margin, got $flickerRaw", flickerRaw.size >= 4)
+
+        val powerHeld = voiced(power, changeMargin = ChordAnalyzer.CHANGE_MARGIN)
+        val flickerHeld = voiced(flicker, changeMargin = ChordAnalyzer.CHANGE_MARGIN)
+        assertEquals(
+            "power-chord sustain should be one chord, got $powerHeld",
+            1,
+            powerHeld.count { it.duration >= 0.2f },
+        )
+        assertEquals(
+            "a weak third should not alternate the label, got $flickerHeld",
+            1,
+            flickerHeld.size,
+        )
+    }
+
+    @Test
     fun testShortBurstDoesNotCreateAChange() {
         val sampleRate = 22050
         val pcm = synthGuitarChord(
@@ -190,62 +223,6 @@ class ChordAnalyzerTest {
     }
 
     @Test
-    fun testGuitarProgressionIgnoresLowBassAndHighPad() {
-        // A full mix: the guitar changes about twice a second, a louder bass
-        // walks roots that are not the guitar's, and a high pad holds a
-        // different triad. The chart should stay on the guitar changes.
-        val sampleRate = 22050
-        val chordSeconds = 0.55f
-        val guitar = listOf(
-            "C" to intArrayOf(48, 52, 55, 60, 64),
-            "G" to intArrayOf(43, 47, 50, 55, 59, 67),
-            "Am" to intArrayOf(45, 52, 57, 60, 64),
-            "F" to intArrayOf(41, 45, 48, 53, 57, 60),
-        )
-        val guitarPcm = concatChords(guitar.map { it.second }, sampleRate, chordSeconds, detuneCents = 10.0)
-        val samplesPerChord = (sampleRate * chordSeconds).toInt()
-        // Bass roots chosen to pull a different triad (F, Bb, D, A).
-        val bassRoots = intArrayOf(29, 34, 26, 33)
-        val pad = synthChordTones(
-            midiNotes = intArrayOf(85, 89, 92), // C#6 E6 F#6, a high triad, not C/G/Am/F
-            sampleCount = guitarPcm.size,
-            sampleRate = sampleRate,
-            harmonicRolloff = 1.2,
-            maxHarmonic = 4,
-            decay = 0.15,
-        )
-        val bassGain = 1.3f
-        val padGain = 1.6f
-        val mix = guitarPcm.copyOf()
-        bassRoots.forEachIndexed { index, midi ->
-            val bass = synthHarmonicTone(
-                midi = midi,
-                sampleCount = samplesPerChord,
-                sampleRate = sampleRate,
-                harmonicRolloff = 1.0,
-                maxHarmonic = 12,
-                decay = 0.8,
-            )
-            addScaled(mix, bass, index * samplesPerChord, gain = bassGain)
-        }
-        addScaled(mix, pad, 0, gain = padGain)
-
-        val guitarChords = guitar.map { it.first }
-        val withoutFocus = voicedChords(mix, focusLow = 36, focusHigh = 96)
-        val withFocus = voicedChords(mix, focusLow = ChromaExtractor.FOCUS_MIDI_LOW, focusHigh = ChromaExtractor.FOCUS_MIDI_HIGH)
-        assertNotEquals(
-            "flat chroma should follow the bass or the pad, got $withoutFocus",
-            guitarChords,
-            withoutFocus,
-        )
-        assertEquals(
-            "guitar-band weighting should keep $guitarChords, got $withFocus (flat was $withoutFocus)",
-            guitarChords,
-            withFocus,
-        )
-    }
-
-    @Test
     fun testPickClicksDoNotSplitARingingChord() {
         val sampleRate = 22050
         val seconds = 2.0f
@@ -263,7 +240,7 @@ class ChordAnalyzerTest {
     }
 
     @Test
-    fun testGuitarFocusKeepsOpenChords() {
+    fun testOpenChordsKeepTheirQuality() {
         val sampleRate = 22050
         val held = listOf(
             "E" to intArrayOf(40, 47, 52, 56, 59, 64),
@@ -282,18 +259,6 @@ class ChordAnalyzerTest {
                 .segments.map { it.chord }.filter { it != "N" }
             assertEquals(name, listOf(name), voiced)
         }
-    }
-
-    @Test
-    fun testGuitarFocusWeightTapersBassRegister() {
-        val lowBass = ChromaExtractor.guitarFocusWeight(36)
-        val openLowE = ChromaExtractor.guitarFocusWeight(40)
-        val chordBody = ChromaExtractor.guitarFocusWeight(60)
-        val topOfBank = ChromaExtractor.guitarFocusWeight(96)
-        assertTrue(chordBody == 1f)
-        assertTrue(topOfBank == 1f)
-        assertTrue(lowBass < openLowE)
-        assertTrue(openLowE < chordBody)
     }
 
     @Test
@@ -422,12 +387,37 @@ class ChordAnalyzerTest {
         }
     }
 
-    private fun voicedChords(pcm: FloatArray, focusLow: Int, focusHigh: Int): List<String> {
+    /**
+     * G power chord the whole way. Every ~0.35s a quiet major or minor third
+     * takes a turn, the way a weak third makes G and Gm trade a near-tie.
+     */
+    private fun synthFlickerThird(sampleRate: Int): FloatArray {
+        val seconds = 2.8f
+        val pcm = synthGuitarChord(
+            midiNotes = intArrayOf(43, 50, 55, 62),
+            sampleCount = (sampleRate * seconds).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 6.0,
+            decay = 0.35,
+        )
+        val slice = (sampleRate * 0.35f).toInt()
+        var at = 0
+        var major = true
+        while (at < pcm.size) {
+            val third = if (major) 59 else 58 // B3 or Bb3
+            val tone = synthHarmonicTone(third, slice.coerceAtMost(pcm.size - at), sampleRate, 1.1, 6, 0.4)
+            addScaled(pcm, tone, at, gain = 0.35f)
+            at += slice
+            major = !major
+        }
+        return pcm
+    }
+
+    private fun voiced(pcm: FloatArray, changeMargin: Float): List<ChordSegment> {
         return ChordAnalyzer.analyze(
             pcm.copyOf(),
             sampleRate = 22050,
-            guitarFocusMidiLow = focusLow,
-            guitarFocusMidiHigh = focusHigh,
-        ).segments.map { it.chord }.filter { it != "N" }
+            changeMargin = changeMargin,
+        ).segments.filter { it.chord != "N" }
     }
 }
