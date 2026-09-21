@@ -4,6 +4,7 @@ import com.paulkircher.chordscout.dsp.ChordAnalyzer
 import com.paulkircher.chordscout.dsp.ChromaExtractor
 import com.paulkircher.chordscout.model.GuitarChordLibrary
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -189,6 +190,113 @@ class ChordAnalyzerTest {
     }
 
     @Test
+    fun testGuitarProgressionIgnoresLowBassAndHighPad() {
+        // A full mix: the guitar changes about twice a second, a louder bass
+        // walks roots that are not the guitar's, and a high pad holds a
+        // different triad. The chart should stay on the guitar changes.
+        val sampleRate = 22050
+        val chordSeconds = 0.55f
+        val guitar = listOf(
+            "C" to intArrayOf(48, 52, 55, 60, 64),
+            "G" to intArrayOf(43, 47, 50, 55, 59, 67),
+            "Am" to intArrayOf(45, 52, 57, 60, 64),
+            "F" to intArrayOf(41, 45, 48, 53, 57, 60),
+        )
+        val guitarPcm = concatChords(guitar.map { it.second }, sampleRate, chordSeconds, detuneCents = 10.0)
+        val samplesPerChord = (sampleRate * chordSeconds).toInt()
+        // Bass roots chosen to pull a different triad (F, Bb, D, A).
+        val bassRoots = intArrayOf(29, 34, 26, 33)
+        val pad = synthChordTones(
+            midiNotes = intArrayOf(85, 89, 92), // C#6 E6 F#6, a high triad, not C/G/Am/F
+            sampleCount = guitarPcm.size,
+            sampleRate = sampleRate,
+            harmonicRolloff = 1.2,
+            maxHarmonic = 4,
+            decay = 0.15,
+        )
+        val bassGain = 1.3f
+        val padGain = 1.6f
+        val mix = guitarPcm.copyOf()
+        bassRoots.forEachIndexed { index, midi ->
+            val bass = synthHarmonicTone(
+                midi = midi,
+                sampleCount = samplesPerChord,
+                sampleRate = sampleRate,
+                harmonicRolloff = 1.0,
+                maxHarmonic = 12,
+                decay = 0.8,
+            )
+            addScaled(mix, bass, index * samplesPerChord, gain = bassGain)
+        }
+        addScaled(mix, pad, 0, gain = padGain)
+
+        val guitarChords = guitar.map { it.first }
+        val withoutFocus = voicedChords(mix, focusLow = 36, focusHigh = 96)
+        val withFocus = voicedChords(mix, focusLow = ChromaExtractor.FOCUS_MIDI_LOW, focusHigh = ChromaExtractor.FOCUS_MIDI_HIGH)
+        assertNotEquals(
+            "flat chroma should follow the bass or the pad, got $withoutFocus",
+            guitarChords,
+            withoutFocus,
+        )
+        assertEquals(
+            "guitar-band weighting should keep $guitarChords, got $withFocus (flat was $withoutFocus)",
+            guitarChords,
+            withFocus,
+        )
+    }
+
+    @Test
+    fun testPickClicksDoNotSplitARingingChord() {
+        val sampleRate = 22050
+        val seconds = 2.0f
+        val pcm = synthGuitarChord(
+            midiNotes = intArrayOf(48, 52, 55, 60, 64),
+            sampleCount = (sampleRate * seconds).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 8.0,
+        )
+        addPickClicks(pcm, sampleRate, spacingSeconds = 0.28f)
+
+        val voiced = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+            .segments.map { it.chord }.filter { it != "N" }
+        assertEquals(listOf("C"), voiced)
+    }
+
+    @Test
+    fun testGuitarFocusKeepsOpenChords() {
+        val sampleRate = 22050
+        val held = listOf(
+            "E" to intArrayOf(40, 47, 52, 56, 59, 64),
+            "A" to intArrayOf(45, 52, 57, 61, 64),
+            "G" to intArrayOf(43, 47, 50, 55, 59, 67),
+            "F" to intArrayOf(41, 45, 48, 53, 57, 60),
+        )
+        held.forEach { (name, notes) ->
+            val pcm = synthGuitarChord(
+                midiNotes = notes,
+                sampleCount = (sampleRate * 1.2f).toInt(),
+                sampleRate = sampleRate,
+                detuneCents = 10.0,
+            )
+            val voiced = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+                .segments.map { it.chord }.filter { it != "N" }
+            assertEquals(name, listOf(name), voiced)
+        }
+    }
+
+    @Test
+    fun testGuitarFocusWeightTapersBassRegister() {
+        val lowBass = ChromaExtractor.guitarFocusWeight(36)
+        val openLowE = ChromaExtractor.guitarFocusWeight(40)
+        val chordBody = ChromaExtractor.guitarFocusWeight(60)
+        val topOfBank = ChromaExtractor.guitarFocusWeight(96)
+        assertTrue(chordBody == 1f)
+        assertTrue(topOfBank == 1f)
+        assertTrue(lowBass < openLowE)
+        assertTrue(openLowE < chordBody)
+    }
+
+    @Test
     fun testConfidenceThresholdCanRejectEverything() {
         val sampleRate = 22050
         val pcm = FloatArray(sampleRate) { sampleIndex ->
@@ -222,6 +330,7 @@ class ChordAnalyzerTest {
         sampleCount: Int,
         sampleRate: Int,
         detuneCents: Double,
+        decay: Double = 1.5,
     ): FloatArray {
         val pcm = FloatArray(sampleCount)
         midiNotes.forEachIndexed { stringIndex, midi ->
@@ -230,7 +339,7 @@ class ChordAnalyzerTest {
             val delay = (0.012 * stringIndex * sampleRate).toInt()
             for (sampleIndex in delay until sampleCount) {
                 val time = sampleIndex.toDouble() / sampleRate
-                val envelope = exp(-1.5 * time)
+                val envelope = exp(-decay * time)
                 var partial = 0.0
                 var harmonic = 1
                 while (harmonic <= 28) {
@@ -244,5 +353,81 @@ class ChordAnalyzerTest {
             }
         }
         return pcm
+    }
+
+    private fun synthHarmonicTone(
+        midi: Int,
+        sampleCount: Int,
+        sampleRate: Int,
+        harmonicRolloff: Double,
+        maxHarmonic: Int,
+        decay: Double,
+    ): FloatArray = synthChordTones(
+        midiNotes = intArrayOf(midi),
+        sampleCount = sampleCount,
+        sampleRate = sampleRate,
+        harmonicRolloff = harmonicRolloff,
+        maxHarmonic = maxHarmonic,
+        decay = decay,
+    )
+
+    private fun synthChordTones(
+        midiNotes: IntArray,
+        sampleCount: Int,
+        sampleRate: Int,
+        harmonicRolloff: Double,
+        maxHarmonic: Int,
+        decay: Double,
+    ): FloatArray {
+        val pcm = FloatArray(sampleCount)
+        midiNotes.forEachIndexed { voice, midi ->
+            val fundamental = 440.0 * 2.0.pow((midi - 69) / 12.0)
+            for (sampleIndex in pcm.indices) {
+                val time = sampleIndex.toDouble() / sampleRate
+                val envelope = exp(-decay * time)
+                var partial = 0.0
+                var harmonic = 1
+                while (harmonic <= maxHarmonic) {
+                    val frequency = fundamental * harmonic
+                    if (frequency >= sampleRate / 2.0 - 40) break
+                    partial += harmonic.toDouble().pow(-harmonicRolloff) *
+                        sin(2.0 * PI * frequency * time + voice * 0.4)
+                    harmonic++
+                }
+                pcm[sampleIndex] += (partial * envelope).toFloat()
+            }
+        }
+        return pcm
+    }
+
+    private fun addScaled(dest: FloatArray, source: FloatArray, offset: Int, gain: Float) {
+        for (i in source.indices) {
+            val at = offset + i
+            if (at >= dest.size) break
+            dest[at] += source[i] * gain
+        }
+    }
+
+    private fun addPickClicks(pcm: FloatArray, sampleRate: Int, spacingSeconds: Float) {
+        val spacing = (sampleRate * spacingSeconds).toInt().coerceAtLeast(1)
+        val click = (sampleRate * 0.004f).toInt()
+        var at = spacing / 3
+        while (at < pcm.size) {
+            for (i in 0 until click) {
+                if (at + i >= pcm.size) break
+                val env = 1.0 - i.toDouble() / click
+                pcm[at + i] += (sin(2.0 * PI * 2400.0 * i / sampleRate) * env * 6.0).toFloat()
+            }
+            at += spacing
+        }
+    }
+
+    private fun voicedChords(pcm: FloatArray, focusLow: Int, focusHigh: Int): List<String> {
+        return ChordAnalyzer.analyze(
+            pcm.copyOf(),
+            sampleRate = 22050,
+            guitarFocusMidiLow = focusLow,
+            guitarFocusMidiHigh = focusHigh,
+        ).segments.map { it.chord }.filter { it != "N" }
     }
 }

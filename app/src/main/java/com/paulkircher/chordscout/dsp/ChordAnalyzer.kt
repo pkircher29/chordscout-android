@@ -123,6 +123,8 @@ object ChordAnalyzer {
         minSegmentDuration: Float = MIN_SEGMENT_DURATION,
         silenceRmsThreshold: Float = SILENCE_RMS_THRESHOLD,
         chromaMedianWidth: Int = CHROMA_MEDIAN_WIDTH,
+        guitarFocusMidiLow: Int = ChromaExtractor.FOCUS_MIDI_LOW,
+        guitarFocusMidiHigh: Int = ChromaExtractor.FOCUS_MIDI_HIGH,
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): AnalysisResult {
         val totalSec = pcm.size.toFloat() / sampleRate
@@ -133,7 +135,17 @@ object ChordAnalyzer {
         // partial decides the chord.
         peakNormalize(pcm)
 
-        val extractor = ChromaExtractor(sampleRate = sampleRate, windowSize = 2048, hopSize = 1024)
+        // Desktop separates drums with HPSS, then scores every semitone from C2 up.
+        // That still hears bass, keys, and vocals. Taper C2–D3 so bass harmonics
+        // do not vote with the fretted chord. Leave the top of the bank alone.
+        // The MIDI window is an analyze() argument so a device pass can nudge it.
+        val extractor = ChromaExtractor(
+            sampleRate = sampleRate,
+            windowSize = 2048,
+            hopSize = 1024,
+            focusMidiLow = guitarFocusMidiLow,
+            focusMidiHigh = guitarFocusMidiHigh,
+        )
         val chromagram = medianSmoothChroma(extractor.extractChromagram(pcm), chromaMedianWidth)
 
         if (chromagram.isEmpty()) {
