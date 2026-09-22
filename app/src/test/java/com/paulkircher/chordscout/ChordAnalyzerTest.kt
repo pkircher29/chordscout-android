@@ -2,6 +2,7 @@ package com.paulkircher.chordscout
 
 import com.paulkircher.chordscout.dsp.ChordAnalyzer
 import com.paulkircher.chordscout.dsp.ChromaExtractor
+import com.paulkircher.chordscout.model.ChordSegment
 import com.paulkircher.chordscout.model.GuitarChordLibrary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -167,6 +168,39 @@ class ChordAnalyzerTest {
     }
 
     @Test
+    fun testNearTieDoesNotFlipUntilItClearsTheMargin() {
+        // A power chord has no third, so G and Gm trade the top score. Without
+        // a margin the chart flickers. With the default margin the sustain is
+        // one chord; changeMargin = 0 brings the flicker back.
+        val sampleRate = 22050
+        val power = synthGuitarChord(
+            midiNotes = intArrayOf(43, 50, 55, 62),
+            sampleCount = (sampleRate * 3.0f).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 8.0,
+        )
+        val flicker = synthFlickerThird(sampleRate)
+
+        val powerRaw = voiced(power, changeMargin = 0f)
+        val flickerRaw = voiced(flicker, changeMargin = 0f)
+        assertTrue("power chord should flicker with no margin, got $powerRaw", powerRaw.count { it.duration >= 0.2f } >= 2)
+        assertTrue("weak-third alternation should flicker with no margin, got $flickerRaw", flickerRaw.size >= 4)
+
+        val powerHeld = voiced(power, changeMargin = ChordAnalyzer.CHANGE_MARGIN)
+        val flickerHeld = voiced(flicker, changeMargin = ChordAnalyzer.CHANGE_MARGIN)
+        assertEquals(
+            "power-chord sustain should be one chord, got $powerHeld",
+            1,
+            powerHeld.count { it.duration >= 0.2f },
+        )
+        assertEquals(
+            "a weak third should not alternate the label, got $flickerHeld",
+            1,
+            flickerHeld.size,
+        )
+    }
+
+    @Test
     fun testShortBurstDoesNotCreateAChange() {
         val sampleRate = 22050
         val pcm = synthGuitarChord(
@@ -186,6 +220,45 @@ class ChordAnalyzerTest {
 
         val result = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
         assertEquals(listOf("C"), result.segments.map { it.chord }.filter { it != "N" })
+    }
+
+    @Test
+    fun testPickClicksDoNotSplitARingingChord() {
+        val sampleRate = 22050
+        val seconds = 2.0f
+        val pcm = synthGuitarChord(
+            midiNotes = intArrayOf(48, 52, 55, 60, 64),
+            sampleCount = (sampleRate * seconds).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 8.0,
+        )
+        addPickClicks(pcm, sampleRate, spacingSeconds = 0.28f)
+
+        val voiced = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+            .segments.map { it.chord }.filter { it != "N" }
+        assertEquals(listOf("C"), voiced)
+    }
+
+    @Test
+    fun testOpenChordsKeepTheirQuality() {
+        val sampleRate = 22050
+        val held = listOf(
+            "E" to intArrayOf(40, 47, 52, 56, 59, 64),
+            "A" to intArrayOf(45, 52, 57, 61, 64),
+            "G" to intArrayOf(43, 47, 50, 55, 59, 67),
+            "F" to intArrayOf(41, 45, 48, 53, 57, 60),
+        )
+        held.forEach { (name, notes) ->
+            val pcm = synthGuitarChord(
+                midiNotes = notes,
+                sampleCount = (sampleRate * 1.2f).toInt(),
+                sampleRate = sampleRate,
+                detuneCents = 10.0,
+            )
+            val voiced = ChordAnalyzer.analyze(pcm, sampleRate = sampleRate)
+                .segments.map { it.chord }.filter { it != "N" }
+            assertEquals(name, listOf(name), voiced)
+        }
     }
 
     @Test
@@ -222,6 +295,7 @@ class ChordAnalyzerTest {
         sampleCount: Int,
         sampleRate: Int,
         detuneCents: Double,
+        decay: Double = 1.5,
     ): FloatArray {
         val pcm = FloatArray(sampleCount)
         midiNotes.forEachIndexed { stringIndex, midi ->
@@ -230,7 +304,7 @@ class ChordAnalyzerTest {
             val delay = (0.012 * stringIndex * sampleRate).toInt()
             for (sampleIndex in delay until sampleCount) {
                 val time = sampleIndex.toDouble() / sampleRate
-                val envelope = exp(-1.5 * time)
+                val envelope = exp(-decay * time)
                 var partial = 0.0
                 var harmonic = 1
                 while (harmonic <= 28) {
@@ -244,5 +318,106 @@ class ChordAnalyzerTest {
             }
         }
         return pcm
+    }
+
+    private fun synthHarmonicTone(
+        midi: Int,
+        sampleCount: Int,
+        sampleRate: Int,
+        harmonicRolloff: Double,
+        maxHarmonic: Int,
+        decay: Double,
+    ): FloatArray = synthChordTones(
+        midiNotes = intArrayOf(midi),
+        sampleCount = sampleCount,
+        sampleRate = sampleRate,
+        harmonicRolloff = harmonicRolloff,
+        maxHarmonic = maxHarmonic,
+        decay = decay,
+    )
+
+    private fun synthChordTones(
+        midiNotes: IntArray,
+        sampleCount: Int,
+        sampleRate: Int,
+        harmonicRolloff: Double,
+        maxHarmonic: Int,
+        decay: Double,
+    ): FloatArray {
+        val pcm = FloatArray(sampleCount)
+        midiNotes.forEachIndexed { voice, midi ->
+            val fundamental = 440.0 * 2.0.pow((midi - 69) / 12.0)
+            for (sampleIndex in pcm.indices) {
+                val time = sampleIndex.toDouble() / sampleRate
+                val envelope = exp(-decay * time)
+                var partial = 0.0
+                var harmonic = 1
+                while (harmonic <= maxHarmonic) {
+                    val frequency = fundamental * harmonic
+                    if (frequency >= sampleRate / 2.0 - 40) break
+                    partial += harmonic.toDouble().pow(-harmonicRolloff) *
+                        sin(2.0 * PI * frequency * time + voice * 0.4)
+                    harmonic++
+                }
+                pcm[sampleIndex] += (partial * envelope).toFloat()
+            }
+        }
+        return pcm
+    }
+
+    private fun addScaled(dest: FloatArray, source: FloatArray, offset: Int, gain: Float) {
+        for (i in source.indices) {
+            val at = offset + i
+            if (at >= dest.size) break
+            dest[at] += source[i] * gain
+        }
+    }
+
+    private fun addPickClicks(pcm: FloatArray, sampleRate: Int, spacingSeconds: Float) {
+        val spacing = (sampleRate * spacingSeconds).toInt().coerceAtLeast(1)
+        val click = (sampleRate * 0.004f).toInt()
+        var at = spacing / 3
+        while (at < pcm.size) {
+            for (i in 0 until click) {
+                if (at + i >= pcm.size) break
+                val env = 1.0 - i.toDouble() / click
+                pcm[at + i] += (sin(2.0 * PI * 2400.0 * i / sampleRate) * env * 6.0).toFloat()
+            }
+            at += spacing
+        }
+    }
+
+    /**
+     * G power chord the whole way. Every ~0.35s a quiet major or minor third
+     * takes a turn, the way a weak third makes G and Gm trade a near-tie.
+     */
+    private fun synthFlickerThird(sampleRate: Int): FloatArray {
+        val seconds = 2.8f
+        val pcm = synthGuitarChord(
+            midiNotes = intArrayOf(43, 50, 55, 62),
+            sampleCount = (sampleRate * seconds).toInt(),
+            sampleRate = sampleRate,
+            detuneCents = 6.0,
+            decay = 0.35,
+        )
+        val slice = (sampleRate * 0.35f).toInt()
+        var at = 0
+        var major = true
+        while (at < pcm.size) {
+            val third = if (major) 59 else 58 // B3 or Bb3
+            val tone = synthHarmonicTone(third, slice.coerceAtMost(pcm.size - at), sampleRate, 1.1, 6, 0.4)
+            addScaled(pcm, tone, at, gain = 0.35f)
+            at += slice
+            major = !major
+        }
+        return pcm
+    }
+
+    private fun voiced(pcm: FloatArray, changeMargin: Float): List<ChordSegment> {
+        return ChordAnalyzer.analyze(
+            pcm.copyOf(),
+            sampleRate = 22050,
+            changeMargin = changeMargin,
+        ).segments.filter { it.chord != "N" }
     }
 }

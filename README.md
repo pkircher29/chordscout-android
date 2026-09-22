@@ -13,7 +13,7 @@ Companion Android port of [ChordScout Desktop](https://github.com/pkircher29/Cho
 - **100% Local & Offline DSP:**
   - Android `MediaExtractor` & `MediaCodec` decoding to mono float PCM, including 16-bit and float decoder output, then an anti-aliased resample to 22.05 kHz.
   - Constant-Q chromagram, one kernel per semitone from C2 to C7, so guitar harmonics are not over-weighted the way a raw FFT bin sum is.
-  - Cosine-similarity chord template matching. Confidence (0.35), silence RMS (0.015), hop (1024), and minimum segment length (0.10 s) match the desktop app. A 3-frame chroma median removes single-frame flicker.
+  - Cosine-similarity chord template matching. Confidence (0.35), silence RMS (0.015), hop (1024), and minimum segment length (0.10 s) match the desktop app. A 3-frame chroma median removes single-frame flicker. After a chord has lasted that minimum, a new chord must lead by 0.03 before the label switches, so a near-tie does not flicker. Desktop uses 0.05; on this chromagram 0.05 also drops a real half-second change.
 - **Studio Dark Aesthetic:**
   - **Rosewood Guitar Fretboard:** Hardware-accelerated canvas rendering with nickel frets, mother-of-pearl position inlays (3rd, 5th, 7th, 9th, 12th double-dot), brass/bronze wound strings, gold finger dot markers, and muted/open string status badges.
   - **Acoustic Strum Synthesizer:** Tap the fretboard or chord badge to hear a physical plucked-string Karplus-Strong / harmonic acoustic strum synthesized in real-time via `AudioTrack`.
