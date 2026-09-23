@@ -72,17 +72,19 @@ class ChromaExtractor(
     }
 
     /**
-     * One L2-normalized, log-compressed chroma vector per hop.
-     * Returns an empty list when [pcm] is shorter than [windowSize].
+     * One L2-normalized, log-compressed chroma vector per hop. Frame i is
+     * centered on the middle of [i * hop, (i + 1) * hop), the span the analyzer
+     * labels with it, and frames run to the end of [pcm]. Kernels that reach
+     * past either end are clipped. Returns an empty list when [pcm] is shorter
+     * than [windowSize].
      */
     fun extractChromagram(pcm: FloatArray): List<FloatArray> {
         if (pcm.size < windowSize || kernels.isEmpty()) return emptyList()
-        val numFrames = 1 + (pcm.size - windowSize) / hopSize
+        val numFrames = (pcm.size + hopSize - 1) / hopSize
         val chromagram = ArrayList<FloatArray>(numFrames)
-        val centerOffset = windowSize / 2
 
         for (frame in 0 until numFrames) {
-            val center = frame * hopSize + centerOffset
+            val center = frameCenter(frame)
             val chroma = FloatArray(12)
             for (kernel in kernels) {
                 val coeffs = kernel.real
@@ -114,6 +116,9 @@ class ChromaExtractor(
         }
         return chromagram
     }
+
+    /** Sample index frame [frame] is centered on. */
+    fun frameCenter(frame: Int): Int = frame * hopSize + hopSize / 2
 
     companion object {
         const val BINS_PER_OCTAVE = 12
