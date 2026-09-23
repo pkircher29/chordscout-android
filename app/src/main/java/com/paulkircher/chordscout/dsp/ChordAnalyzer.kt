@@ -24,15 +24,20 @@ object ChordAnalyzer {
     const val CHROMA_MEDIAN_WIDTH = 3
 
     /**
-     * Once a chord has lasted [MIN_SEGMENT_DURATION], a challenger must beat
-     * it by this much. Desktop uses 0.05. On this chromagram 0.05 also blocks
-     * a real F after Am, so the default is a step smaller. Zero is frame-by-frame
-     * argmax. The hold lets go when the current chord falls under
-     * [CONFIDENCE_THRESHOLD] or the frame is silent. It does not start during
-     * the attack, or a slightly-off first frame (open E scored as Em) gets glued
-     * on for the whole chord.
+     * Cost of changing chords, in frame-score units, for the Viterbi decode.
+     * A new chord is kept only if, summed over every frame it lasts, it beats
+     * the alternative by more than this. A real change keeps winning frame
+     * after frame and pays it off quickly, so it lands on the frame where the
+     * evidence flips. A near-tie leads by a few hundredths at a time and never
+     * does. This one number replaces the old per-frame hold, margin and
+     * attack rules, which had to trade missed changes against flicker.
+     *
+     * The shortest change it keeps is about penalty / lead frames. A clean F
+     * after Am leads by ~0.10 a frame (they share two notes), so at 0.8 that
+     * change needs ~0.37 s. Lower it for faster changes, raise it for fewer
+     * blips; on real mixes 0.7-1.0 all behave, with no cliff in between.
      */
-    const val CHANGE_MARGIN = 0.03f
+    const val SWITCH_PENALTY = 0.8f
 
     // Krumhansl-Schmuckler key profiles
     private val MAJOR_PROFILE = floatArrayOf(6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f)
@@ -134,7 +139,7 @@ object ChordAnalyzer {
         minSegmentDuration: Float = MIN_SEGMENT_DURATION,
         silenceRmsThreshold: Float = SILENCE_RMS_THRESHOLD,
         chromaMedianWidth: Int = CHROMA_MEDIAN_WIDTH,
-        changeMargin: Float = CHANGE_MARGIN,
+        switchPenalty: Float = SWITCH_PENALTY,
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): AnalysisResult {
         val totalSec = pcm.size.toFloat() / sampleRate
@@ -162,67 +167,49 @@ object ChordAnalyzer {
         }
         val estimatedKey = estimateKey(globalChroma)
 
-        // Template correlation
         val templates = buildChordTemplates(includeSevenths)
-        val templateEntries = templates.entries.toList()
+        val chordNames = templates.keys.toTypedArray()
+        val templateVecs = templates.values.map { centered(it) }.toTypedArray()
+        val dt = extractor.hopSize.toFloat() / sampleRate
+
+        // Frame scores for every chord plus "N" (last state). N scores the
+        // confidence threshold, so it wins where no chord clears it, and owns
+        // silent frames outright.
+        val numStates = chordNames.size + 1
+        val noChord = numStates - 1
+        val scores = Array(chromagram.size) { FloatArray(numStates) }
+        for (i in chromagram.indices) {
+            val frame = scores[i]
+            val energy = frameRms(pcm, extractor.frameCenter(i) - extractor.windowSize / 2, extractor.windowSize)
+            if (energy < silenceRmsThreshold) {
+                frame.fill(-1f)
+                frame[noChord] = 1f
+                continue
+            }
+            val chroma = centered(chromagram[i])
+            for (c in templateVecs.indices) {
+                val tVec = templateVecs[c]
+                var dot = 0.0f
+                for (p in 0 until 12) dot += chroma[p] * tVec[p]
+                frame[c] = dot
+            }
+            frame[noChord] = confidenceThreshold
+        }
+
+        val path = viterbi(scores, switchPenalty)
 
         val rawSegments = ArrayList<ChordSegment>(chromagram.size)
-        val dt = extractor.hopSize.toFloat() / sampleRate
-        var heldChord: String? = null
-        var heldFrames = 0
-
         for (i in chromagram.indices) {
             val tStart = i * dt
             val tEnd = min(totalSec, tStart + dt)
-            val energy = frameRms(pcm, i * extractor.hopSize, extractor.windowSize)
-            if (energy < silenceRmsThreshold) {
-                heldChord = null
-                heldFrames = 0
+            val state = path[i]
+            if (state == noChord) {
                 rawSegments.add(ChordSegment(tStart, tEnd, "N", 1.0f))
-                continue
-            }
-
-            val chroma = chromagram[i]
-            var bestScore = -1.0f
-            var bestChord = "N"
-            var heldScore = -1.0f
-
-            for (entry in templateEntries) {
-                var dot = 0.0f
-                val tVec = entry.value
-                for (p in 0 until 12) {
-                    dot += chroma[p] * tVec[p]
-                }
-                if (entry.key == heldChord) heldScore = dot
-                if (dot > bestScore) {
-                    bestScore = dot
-                    bestChord = entry.key
-                }
-            }
-
-            if (bestScore < confidenceThreshold) {
-                heldChord = null
-                heldFrames = 0
-                rawSegments.add(ChordSegment(tStart, tEnd, "N", 0.5f))
-                continue
-            }
-            val locked = heldChord != null && heldFrames * dt >= minSegmentDuration
-            val release = heldChord == null ||
-                bestChord == heldChord ||
-                heldScore < confidenceThreshold ||
-                !locked ||
-                changeMargin <= 0f ||
-                bestScore >= heldScore + changeMargin
-            if (release && bestChord != heldChord) {
-                heldChord = bestChord
-                heldScore = bestScore
-                heldFrames = 1
             } else {
-                if (bestChord == heldChord) heldScore = bestScore
-                heldFrames++
+                // Centered scores run lower than cosine: a clean triad is ~0.55.
+                val conf = max(0.1f, min(1.0f, (scores[i][state] - 0.2f) / 0.5f))
+                rawSegments.add(ChordSegment(tStart, tEnd, chordNames[state], conf))
             }
-            val conf = max(0.1f, min(1.0f, (heldScore - 0.2f) / 0.8f))
-            rawSegments.add(ChordSegment(tStart, tEnd, heldChord!!, conf))
         }
 
         onProgress(0.85f, "Consolidating segments...")
@@ -239,6 +226,56 @@ object ChordAnalyzer {
         return AnalysisResult(metadata, smoothed)
     }
 
+    /**
+     * Mean-removed, unit-length copy. Log-compressed constant-Q chroma has a
+     * high floor in every bin, so plain cosine puts C at 0.62 and Cm at 0.59
+     * on a clean C triad. Centering both sides scores the shape instead of
+     * the floor (Pearson correlation) and spreads those apart.
+     */
+    private fun centered(vec: FloatArray): FloatArray {
+        val mean = vec.sum() / vec.size
+        return normalize(FloatArray(vec.size) { vec[it] - mean })
+    }
+
+    /**
+     * Highest-scoring state path when every change costs [penalty]. Staying is
+     * free and all changes cost the same, so each step only needs the best
+     * previous state, not a full transition matrix: O(frames x states).
+     */
+    private fun viterbi(scores: Array<FloatArray>, penalty: Float): IntArray {
+        val frames = scores.size
+        val states = scores[0].size
+        val back = Array(frames) { IntArray(states) }
+        var total = scores[0].copyOf()
+        var next = FloatArray(states)
+        for (t in 1 until frames) {
+            var bestPrev = 0
+            for (s in 1 until states) if (total[s] > total[bestPrev]) bestPrev = s
+            val switchTotal = total[bestPrev] - penalty
+            val frame = scores[t]
+            for (s in 0 until states) {
+                if (total[s] >= switchTotal) {
+                    next[s] = total[s] + frame[s]
+                    back[t][s] = s
+                } else {
+                    next[s] = switchTotal + frame[s]
+                    back[t][s] = bestPrev
+                }
+            }
+            val swap = total
+            total = next
+            next = swap
+        }
+        val path = IntArray(frames)
+        var state = 0
+        for (s in 1 until states) if (total[s] > total[state]) state = s
+        for (t in frames - 1 downTo 0) {
+            path[t] = state
+            state = back[t][state]
+        }
+        return path
+    }
+
     private fun peakNormalize(pcm: FloatArray) {
         var peak = 0f
         for (sample in pcm) {
@@ -250,8 +287,9 @@ object ChordAnalyzer {
         for (i in pcm.indices) pcm[i] *= gain
     }
 
-    private fun frameRms(pcm: FloatArray, offset: Int, length: Int): Float {
-        val end = min(pcm.size, offset + length)
+    private fun frameRms(pcm: FloatArray, start: Int, length: Int): Float {
+        val offset = max(0, start)
+        val end = min(pcm.size, start + length)
         if (end <= offset) return 0f
         var sum = 0.0
         for (i in offset until end) {
