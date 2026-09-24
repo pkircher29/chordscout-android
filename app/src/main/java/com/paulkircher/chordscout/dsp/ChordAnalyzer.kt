@@ -13,12 +13,18 @@ object ChordAnalyzer {
     val PITCH_NAMES = arrayOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
     /**
-     * Shared with desktop `analyze_chords`. These are not the Android miss:
-     * lowering them is what makes desktop report changes that are not there.
-     * Real guitar changes were dropped because the chromagram flickered, so
-     * a correct chord never lasted [MIN_SEGMENT_DURATION] and was absorbed.
+     * Below this centered-correlation score a frame is "N" (no chord). It is
+     * not desktop's 0.35: that was a cosine score, and centered scores run
+     * lower (a clean triad is ~0.55, a chord in a full mix often 0.25-0.35).
+     * At 0.35 real mixes showed 1-3 s "N" gaps while a chord was playing.
+     * At 0.20-0.25 "N" is left to silence and intros, as before.
      */
-    const val CONFIDENCE_THRESHOLD = 0.35f
+    const val CONFIDENCE_THRESHOLD = 0.20f
+
+    /**
+     * Shared with desktop `analyze_chords`. Lowering them is what makes
+     * desktop report changes that are not there.
+     */
     const val MIN_SEGMENT_DURATION = 0.10f
     const val SILENCE_RMS_THRESHOLD = 0.015f
     const val CHROMA_MEDIAN_WIDTH = 3
@@ -33,11 +39,11 @@ object ChordAnalyzer {
      * attack rules, which had to trade missed changes against flicker.
      *
      * The shortest change it keeps is about penalty / lead frames. A clean F
-     * after Am leads by ~0.10 a frame (they share two notes), so at 0.8 that
-     * change needs ~0.37 s. Lower it for faster changes, raise it for fewer
+     * after Am leads by ~0.10 a frame (they share two notes), so at 0.9 that
+     * change needs ~0.4 s. Lower it for faster changes, raise it for fewer
      * blips; on real mixes 0.7-1.0 all behave, with no cliff in between.
      */
-    const val SWITCH_PENALTY = 0.8f
+    const val SWITCH_PENALTY = 0.9f
 
     // Krumhansl-Schmuckler key profiles
     private val MAJOR_PROFILE = floatArrayOf(6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f)
