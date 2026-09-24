@@ -6,6 +6,7 @@ import com.paulkircher.chordscout.model.SongMetadata
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 object ChordAnalyzer {
@@ -19,7 +20,7 @@ object ChordAnalyzer {
      * At 0.35 real mixes showed 1-3 s "N" gaps while a chord was playing.
      * At 0.20-0.25 "N" is left to silence and intros, as before.
      */
-    const val CONFIDENCE_THRESHOLD = 0.20f
+    const val CONFIDENCE_THRESHOLD = 0.25f
 
     /**
      * Shared with desktop `analyze_chords`. Lowering them is what makes
@@ -44,6 +45,27 @@ object ChordAnalyzer {
      * blips; on real mixes 0.7-1.0 all behave, with no cliff in between.
      */
     const val SWITCH_PENALTY = 0.9f
+
+    /**
+     * Head start for chords in the song's key on the second decode. The key
+     * comes from the first decode's chords, not from raw chroma. Where a
+     * chord is clearly played it wins by far more than this. Where the mix
+     * is thin every chord scores about the same, and without it the decoder
+     * picks out-of-key chords by chance (Cm, F, F#m in a D major song).
+     * Zero skips the second pass.
+     */
+    const val KEY_BONUS = 0.05f
+
+    /**
+     * How much a frame's evidence counts, by how clearly it holds a chord.
+     * A cleanly played chord scores about [CLEAR_SCORE] and counts in full.
+     * A thin passage scores ~0.3 and every chord is a near-tie, so it counts
+     * for (score / CLEAR_SCORE)^power: changes there need longer to pay the
+     * switch penalty and stop flickering, while clear quick changes still
+     * switch at the normal cost. Zero turns weighting off.
+     */
+    const val CLARITY_POWER = 2f
+    private const val CLEAR_SCORE = 0.5f
 
     // Krumhansl-Schmuckler key profiles
     private val MAJOR_PROFILE = floatArrayOf(6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f)
@@ -146,6 +168,8 @@ object ChordAnalyzer {
         silenceRmsThreshold: Float = SILENCE_RMS_THRESHOLD,
         chromaMedianWidth: Int = CHROMA_MEDIAN_WIDTH,
         switchPenalty: Float = SWITCH_PENALTY,
+        keyBonus: Float = KEY_BONUS,
+        clarityPower: Float = CLARITY_POWER,
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): AnalysisResult {
         val totalSec = pcm.size.toFloat() / sampleRate
@@ -184,6 +208,7 @@ object ChordAnalyzer {
         val numStates = chordNames.size + 1
         val noChord = numStates - 1
         val scores = Array(chromagram.size) { FloatArray(numStates) }
+        val weights = FloatArray(chromagram.size) { 1f }
         for (i in chromagram.indices) {
             val frame = scores[i]
             val energy = frameRms(pcm, extractor.frameCenter(i) - extractor.windowSize / 2, extractor.windowSize)
@@ -200,9 +225,24 @@ object ChordAnalyzer {
                 frame[c] = dot
             }
             frame[noChord] = confidenceThreshold
+            var best = 0f
+            for (c in templateVecs.indices) best = max(best, frame[c])
+            weights[i] = min(1f, (best / CLEAR_SCORE).pow(clarityPower))
         }
 
-        val path = viterbi(scores, switchPenalty)
+        var path = viterbi(scores, weights, switchPenalty)
+
+        // Second pass: find the key the first pass's chords live in, give
+        // those chords a head start, and decode again.
+        val songKey = keyFromChords(path, chordNames)
+        if (songKey != null && keyBonus > 0f) {
+            val inKey = BooleanArray(chordNames.size) { isDiatonic(chordNames[it], songKey.first) }
+            for (frame in scores) {
+                if (frame[noChord] == 1f) continue // silent
+                for (c in chordNames.indices) if (inKey[c]) frame[c] += keyBonus
+            }
+            path = viterbi(scores, weights, switchPenalty)
+        }
 
         val rawSegments = ArrayList<ChordSegment>(chromagram.size)
         for (i in chromagram.indices) {
@@ -227,7 +267,7 @@ object ChordAnalyzer {
             durationSeconds = totalSec,
             sampleRate = sampleRate,
             tempoBpm = 120f,
-            estimatedKey = estimatedKey,
+            estimatedKey = songKey?.let { keyName(it.first, it.second) } ?: estimatedKey,
         )
         return AnalysisResult(metadata, smoothed)
     }
@@ -238,6 +278,54 @@ object ChordAnalyzer {
      * on a clean C triad. Centering both sides scores the shape instead of
      * the floor (Pearson correlation) and spreads those apart.
      */
+    /** Root pitch class and minor flag of a chord name ("F#m7" -> 6, true). */
+    private fun parseChord(name: String): Pair<Int, Boolean>? {
+        val rootName = if (name.length > 1 && name[1] == '#') name.substring(0, 2) else name.substring(0, 1)
+        val root = PITCH_NAMES.indexOf(rootName)
+        if (root < 0) return null
+        return root to name.substring(rootName.length).startsWith("m")
+    }
+
+    /** True if [chord] is I, IV, V (major) or ii, iii, vi (minor) of [tonic] major. */
+    fun isDiatonic(chord: String, tonic: Int): Boolean {
+        val (root, minor) = parseChord(chord) ?: return false
+        val degree = (root - tonic + 12) % 12
+        return if (minor) degree == 2 || degree == 4 || degree == 9 else degree == 0 || degree == 5 || degree == 7
+    }
+
+    /**
+     * Major-key tonic whose diatonic chords cover the most decoded frames,
+     * and whether the song sits on its relative minor (vi clearly outlasts I).
+     * Null when fewer than two seconds of chords were found.
+     */
+    fun keyFromChords(path: IntArray, chordNames: Array<String>): Pair<Int, Boolean>? {
+        val frames = IntArray(chordNames.size)
+        for (state in path) if (state < chordNames.size) frames[state]++
+        if (frames.sum() < 43) return null
+        var bestTonic = 0
+        var bestCover = -1
+        for (tonic in 0 until 12) {
+            var cover = 0
+            for (c in chordNames.indices) if (isDiatonic(chordNames[c], tonic)) cover += frames[c]
+            // A tie (keys a fifth apart share four chords) goes to the key
+            // whose I or vi chord is actually heard more.
+            cover = cover * 4 + frames[chordNames.indexOf(PITCH_NAMES[tonic])] +
+                frames[chordNames.indexOf("${PITCH_NAMES[(tonic + 9) % 12]}m")]
+            if (cover > bestCover) {
+                bestCover = cover
+                bestTonic = tonic
+            }
+        }
+        val major = frames[chordNames.indexOf(PITCH_NAMES[bestTonic])]
+        val relMinor = frames[chordNames.indexOf("${PITCH_NAMES[(bestTonic + 9) % 12]}m")]
+        // Only the name depends on this (both share the same chords), and a
+        // near-even split is usually a major song visiting vi.
+        return bestTonic to (relMinor > major * 5 / 4)
+    }
+
+    private fun keyName(tonic: Int, minor: Boolean): String =
+        if (minor) "${PITCH_NAMES[(tonic + 9) % 12]} minor" else "${PITCH_NAMES[tonic]} major"
+
     private fun centered(vec: FloatArray): FloatArray {
         val mean = vec.sum() / vec.size
         return normalize(FloatArray(vec.size) { vec[it] - mean })
@@ -248,23 +336,24 @@ object ChordAnalyzer {
      * free and all changes cost the same, so each step only needs the best
      * previous state, not a full transition matrix: O(frames x states).
      */
-    private fun viterbi(scores: Array<FloatArray>, penalty: Float): IntArray {
+    private fun viterbi(scores: Array<FloatArray>, weights: FloatArray, penalty: Float): IntArray {
         val frames = scores.size
         val states = scores[0].size
         val back = Array(frames) { IntArray(states) }
-        var total = scores[0].copyOf()
+        var total = FloatArray(states) { scores[0][it] * weights[0] }
         var next = FloatArray(states)
         for (t in 1 until frames) {
             var bestPrev = 0
             for (s in 1 until states) if (total[s] > total[bestPrev]) bestPrev = s
             val switchTotal = total[bestPrev] - penalty
             val frame = scores[t]
+            val w = weights[t]
             for (s in 0 until states) {
                 if (total[s] >= switchTotal) {
-                    next[s] = total[s] + frame[s]
+                    next[s] = total[s] + w * frame[s]
                     back[t][s] = s
                 } else {
-                    next[s] = switchTotal + frame[s]
+                    next[s] = switchTotal + w * frame[s]
                     back[t][s] = bestPrev
                 }
             }

@@ -308,6 +308,42 @@ class ChordAnalyzerTest {
     }
 
     @Test
+    fun testKeyComesFromTheDecodedChords() {
+        // C G Am F is C major; the raw-chroma key profile often misses it.
+        val sampleRate = 22050
+        val notes = listOf(
+            intArrayOf(48, 52, 55, 60, 64),
+            intArrayOf(43, 47, 50, 55, 59, 67),
+            intArrayOf(45, 52, 57, 60, 64),
+            intArrayOf(41, 45, 48, 53, 57, 60),
+        )
+        val pcm = concatChords(notes, sampleRate, 1.0f, detuneCents = 6.0)
+        assertEquals("C major", ChordAnalyzer.analyze(pcm, sampleRate = sampleRate).metadata.estimatedKey)
+    }
+
+    @Test
+    fun testKeyFromChordsPicksRelativeMinorWhenViOutlastsI() {
+        val names = ChordAnalyzer.buildChordTemplates().keys.toTypedArray()
+        fun frames(vararg pairs: Pair<String, Int>) =
+            pairs.flatMap { (chord, count) -> List(count) { names.indexOf(chord) } }.toIntArray()
+
+        assertEquals(0 to false, ChordAnalyzer.keyFromChords(frames("C" to 40, "F" to 20, "G" to 20, "Am" to 10), names))
+        // Am, Dm, G, C are all C major's chords; Am outlasting C makes it A minor.
+        assertEquals(0 to true, ChordAnalyzer.keyFromChords(frames("Am" to 50, "Dm" to 20, "G" to 15, "C" to 10), names))
+        // D major: D G A Bm; the out-of-key Cm blip does not move it.
+        assertEquals(2 to false, ChordAnalyzer.keyFromChords(frames("D" to 40, "G" to 30, "A" to 20, "Bm" to 30, "Cm" to 5), names))
+        assertEquals(null, ChordAnalyzer.keyFromChords(frames("C" to 10), names))
+    }
+
+    @Test
+    fun testDiatonicChords() {
+        val inC = listOf("C", "Dm", "Em", "F", "G", "Am", "G7", "Am7")
+        val outOfC = listOf("Cm", "D", "E", "Fm", "A#", "Bm", "C#")
+        inC.forEach { assertTrue("$it is in C", ChordAnalyzer.isDiatonic(it, 0)) }
+        outOfC.forEach { assertTrue("$it is not in C", !ChordAnalyzer.isDiatonic(it, 0)) }
+    }
+
+    @Test
     fun testConfidenceThresholdCanRejectEverything() {
         val sampleRate = 22050
         val pcm = FloatArray(sampleRate) { sampleIndex ->
