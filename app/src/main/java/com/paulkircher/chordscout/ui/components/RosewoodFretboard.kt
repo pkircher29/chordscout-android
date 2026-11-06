@@ -3,6 +3,7 @@ package com.paulkircher.chordscout.ui.components
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -11,33 +12,60 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.paulkircher.chordscout.dsp.GuitarSynth
-import com.paulkircher.chordscout.model.GuitarChord
 import com.paulkircher.chordscout.model.GuitarChordLibrary
 import com.paulkircher.chordscout.ui.theme.*
-import kotlinx.coroutines.launch
 
 @Composable
 fun RosewoodFretboard(
     chordName: String,
-    capoFret: Int = 0,
+    onStrumChord: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val chord = GuitarChordLibrary.getChord(chordName)
-    val scope = rememberCoroutineScope()
+    val mutedPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.parseColor("#F43F5E")
+            textAlign = android.graphics.Paint.Align.CENTER
+            isFakeBoldText = true
+            isAntiAlias = true
+        }
+    }
+    val openPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.parseColor("#10B981")
+            textAlign = android.graphics.Paint.Align.CENTER
+            isFakeBoldText = true
+            isAntiAlias = true
+        }
+    }
+    val fingerPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.WHITE
+            textAlign = android.graphics.Paint.Align.CENTER
+            isFakeBoldText = true
+            isAntiAlias = true
+        }
+    }
+    val fretLabelPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.parseColor("#94A3B8")
+            textAlign = android.graphics.Paint.Align.RIGHT
+            isFakeBoldText = true
+            isAntiAlias = true
+        }
+    }
 
     Card(
         modifier = modifier
@@ -60,7 +88,7 @@ fun RosewoodFretboard(
             ) {
                 Column {
                     Text(
-                        text = if (chordName.isEmpty() || chordName == "N") "—" else chordName,
+                        text = if (chordName.isEmpty() || chordName == "N" || chordName == "—") "—" else chordName,
                         color = AccentCyan,
                         fontSize = 28.sp,
                         fontWeight = FontWeight.Black,
@@ -74,11 +102,7 @@ fun RosewoodFretboard(
                 }
 
                 Button(
-                    onClick = {
-                        chord?.let {
-                            scope.launch { GuitarSynth.playChord(it) }
-                        }
-                    },
+                    onClick = onStrumChord,
                     enabled = chord != null,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFF0284C7),
@@ -93,12 +117,15 @@ fun RosewoodFretboard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Canvas Fretboard
+            // Canvas Fretboard (tap to strum)
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(200.dp)
-                    .background(Color(0xFF131722)),
+                    .background(BgPanel)
+                    .clickable(enabled = chord != null) {
+                        onStrumChord()
+                    },
             ) {
                 val padX = 40.dp.toPx()
                 val marginTop = 35.dp.toPx()
@@ -111,6 +138,11 @@ fun RosewoodFretboard(
                 val dx = boardW / (numStrings - 1)
                 val dy = boardH / numFrets
                 val baseFret = chord?.baseFret ?: 1
+                val labelTextSize = 11.sp.toPx()
+                mutedPaint.textSize = labelTextSize
+                openPaint.textSize = labelTextSize
+                fingerPaint.textSize = labelTextSize
+                fretLabelPaint.textSize = labelTextSize
 
                 // 1. Draw Rosewood block
                 drawRoundRect(
@@ -120,21 +152,32 @@ fun RosewoodFretboard(
                     cornerRadius = CornerRadius(8f, 8f),
                 )
 
-                // 2. Pearloid inlays
+                // 2. Pearloid inlays (3rd, 5th, 7th, 9th single dot; 12th double dot)
                 for (f in 1..numFrets) {
                     val absFret = baseFret + f - 1
+                    val cy = marginTop + ((f - 0.5f) * dy)
                     if (absFret in listOf(3, 5, 7, 9)) {
-                        val cy = marginTop + ((f - 0.5f) * dy)
                         val cx = padX + (boardW / 2f)
                         drawCircle(
                             color = Color(0xFFCBD5E1),
                             radius = 5.dp.toPx(),
                             center = Offset(cx, cy),
                         )
+                    } else if (absFret == 12) {
+                        drawCircle(
+                            color = Color(0xFFCBD5E1),
+                            radius = 5.dp.toPx(),
+                            center = Offset(padX + (boardW * 0.3f), cy),
+                        )
+                        drawCircle(
+                            color = Color(0xFFCBD5E1),
+                            radius = 5.dp.toPx(),
+                            center = Offset(padX + (boardW * 0.7f), cy),
+                        )
                     }
                 }
 
-                // 3. Nut or normal fret line
+                // 3. Nut or normal fret line + base-fret indicator
                 if (baseFret == 1) {
                     drawRoundRect(
                         color = Color(0xFFE2E8F0),
@@ -148,6 +191,12 @@ fun RosewoodFretboard(
                         start = Offset(padX, marginTop),
                         end = Offset(padX + boardW, marginTop),
                         strokeWidth = 2.dp.toPx(),
+                    )
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "${baseFret}fr",
+                        padX - 12.dp.toPx(),
+                        marginTop + (0.5f * dy) + 4.dp.toPx(),
+                        fretLabelPaint,
                     )
                 }
 
@@ -190,12 +239,7 @@ fun RosewoodFretboard(
                                 "x",
                                 x,
                                 marginTop - 14.dp.toPx(),
-                                android.graphics.Paint().apply {
-                                    color = android.graphics.Color.parseColor("#F43F5E")
-                                    textSize = 28f
-                                    textAlign = android.graphics.Paint.Align.CENTER
-                                    isFakeBoldText = true
-                                }
+                                mutedPaint,
                             )
                         }
                         0 -> {
@@ -209,12 +253,7 @@ fun RosewoodFretboard(
                                 "o",
                                 x,
                                 marginTop - 14.dp.toPx(),
-                                android.graphics.Paint().apply {
-                                    color = android.graphics.Color.parseColor("#10B981")
-                                    textSize = 28f
-                                    textAlign = android.graphics.Paint.Align.CENTER
-                                    isFakeBoldText = true
-                                }
+                                openPaint,
                             )
                         }
                         else -> {
@@ -223,7 +262,7 @@ fun RosewoodFretboard(
                             if (relFret in 1..numFrets) {
                                 val cy = marginTop + ((relFret - 0.5f) * dy)
                                 drawCircle(
-                                    color = Color(0xFF38BDF8),
+                                    color = AccentCyan,
                                     radius = 9.dp.toPx(),
                                     center = Offset(x, cy),
                                 )
@@ -233,12 +272,7 @@ fun RosewoodFretboard(
                                         finger.toString(),
                                         x,
                                         cy + 4.dp.toPx(),
-                                        android.graphics.Paint().apply {
-                                            color = android.graphics.Color.WHITE
-                                            textSize = 28f
-                                            textAlign = android.graphics.Paint.Align.CENTER
-                                            isFakeBoldText = true
-                                        }
+                                        fingerPaint,
                                     )
                                 }
                             }

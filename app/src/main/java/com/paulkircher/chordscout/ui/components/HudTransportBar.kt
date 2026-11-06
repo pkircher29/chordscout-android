@@ -2,6 +2,7 @@ package com.paulkircher.chordscout.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -22,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.paulkircher.chordscout.model.ChordSegment
 import com.paulkircher.chordscout.ui.theme.*
+import java.util.Locale
+import kotlin.math.abs
 
 @Composable
 fun HudTransportBar(
@@ -29,7 +32,6 @@ fun HudTransportBar(
     nextChord: String?,
     nextCountdownSeconds: Float?,
     keyEstimate: String?,
-    tempoBpm: Float?,
     isPlaying: Boolean,
     currentTimeSec: Float,
     totalTimeSec: Float,
@@ -40,6 +42,7 @@ fun HudTransportBar(
     onNextChord: () -> Unit,
     onToggleLoop: () -> Unit,
     onSpeedSelected: (Float) -> Unit,
+    onStrumChord: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -57,12 +60,15 @@ fun HudTransportBar(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Current Chord Badge
+            // Current Chord Badge (tap to strum)
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xFF182236))
                     .border(2.dp, AccentCyan, RoundedCornerShape(8.dp))
+                    .clickable(enabled = currentChord.isNotEmpty() && currentChord != "N" && currentChord != "—") {
+                        onStrumChord()
+                    }
                     .padding(horizontal = 14.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -84,15 +90,19 @@ fun HudTransportBar(
                     Text("UPCOMING", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                     Text(nextChord, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     if (nextCountdownSeconds != null && nextCountdownSeconds > 0) {
-                        Text("in ${String.format("%.1f", nextCountdownSeconds)}s", color = AccentAmber, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            "in ${String.format(Locale.US, "%.1f", nextCountdownSeconds)}s",
+                            color = AccentAmber,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
                     }
                 }
             }
 
-            // Key / Tempo
+            // Key & Elapsed Time
             Column(horizontalAlignment = Alignment.End) {
                 Text("Key: ${keyEstimate ?: "N/A"}", color = AccentPurple, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Text("${tempoBpm?.toInt() ?: 120} BPM", color = AccentEmerald, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Text(
                     "${ChordSegment.formatTimestamp(currentTimeSec)} / ${ChordSegment.formatTimestamp(totalTimeSec)}",
                     color = TextSecondary,
@@ -110,10 +120,10 @@ fun HudTransportBar(
         ) {
             // Transport buttons
             Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onPrevChord) {
+                IconButton(onClick = onPrevChord, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.SkipPrevious, contentDescription = "Prev Chord", tint = TextPrimary)
                 }
 
@@ -121,23 +131,24 @@ fun HudTransportBar(
                     onClick = onTogglePlay,
                     colors = ButtonDefaults.buttonColors(containerColor = AccentAmber),
                     shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 ) {
                     Icon(
                         if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = "Play/Pause",
                         tint = BgMain,
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (isPlaying) "PAUSE" else "PLAY", color = BgMain, fontWeight = FontWeight.Black)
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Text(if (isPlaying) "PAUSE" else "PLAY", color = BgMain, fontWeight = FontWeight.Black, fontSize = 11.sp)
                 }
 
-                IconButton(onClick = onNextChord) {
+                IconButton(onClick = onNextChord, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.SkipNext, contentDescription = "Next Chord", tint = TextPrimary)
                 }
 
                 IconButton(
                     onClick = onToggleLoop,
+                    modifier = Modifier.size(32.dp),
                     colors = IconButtonDefaults.iconButtonColors(
                         contentColor = if (isLooping) AccentAmber else TextMuted
                     ),
@@ -146,17 +157,17 @@ fun HudTransportBar(
                 }
             }
 
-            // Practice Speeds (0.75x, 1.0x, 1.25x)
+            // Practice Speeds (0.5x, 0.75x, 1.0x, 1.25x)
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf(0.75f, 1.0f, 1.25f).forEach { speed ->
-                    val isSelected = Math.abs(playbackSpeed - speed) < 0.05f
+                listOf(0.5f, 0.75f, 1.0f, 1.25f).forEach { speed ->
+                    val isSelected = abs(playbackSpeed - speed) < 0.05f
                     Surface(
                         onClick = { onSpeedSelected(speed) },
                         shape = RoundedCornerShape(6.dp),
-                        color = if (isSelected) Color(0xFF0284C7) else Color(0xFF1E2638),
+                        color = if (isSelected) Color(0xFF0284C7) else BorderSubtle,
                         modifier = Modifier.height(28.dp),
                     ) {
-                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 8.dp)) {
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 6.dp)) {
                             Text(
                                 "${speed}x",
                                 color = if (isSelected) Color.White else TextSecondary,

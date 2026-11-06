@@ -1,94 +1,84 @@
-# ChordScout Android 🎸
+# ChordScout Android (`com.paulkircher.chordscout`)
 
-Local-first, privacy-respecting audio chord recognition app for Android built with Kotlin and Jetpack Compose.
+## System Overview
 
-ChordScout listens to or decodes an audio file (MP3, WAV, FLAC, M4A, OGG) completely on-device without any internet connection, cloud upload, or telemetry. It extracts pitch chromagrams, performs template-matching chord estimation across major, minor, and 7th chords, and displays the song's progression on an interactive rosewood fretboard and synchronized timeline.
+Offline, on-device Android application (`v0.4.0`, `minSdk = 26`, `targetSdk = 35`) for guitar chord recognition, fretboard visualization, and interactive practice from local audio files (`MP3`, `WAV`, `FLAC`, `M4A`, `OGG`). Built with Kotlin `2.1.20`, Jetpack Compose (Material 3), Android `MediaExtractor` / `MediaCodec`, and Media3 `ExoPlayer` (`1.5.1`). It extracts 12-pitch constant-Q chromagrams, runs two-pass key-aware Viterbi chord estimation across 24 major and minor triad templates by default (or 48 templates including dominant 7th and minor 7th when `includeSevenths = true`), and presents the detected chord progression on a color-coded waveform timeline, a rosewood 6-string fretboard diagram with synthesized audio preview, and a 4-column lead-sheet grid with practice loop and speed controls (`0.5x`, `0.75x`, `1.0x`, `1.25x`).
 
-Companion Android port of [ChordScout Desktop](https://github.com/pkircher29/ChordScout).
-
----
-
-## ✨ Features
-
-- **100% Local & Offline DSP:**
-  - Android `MediaExtractor` & `MediaCodec` decoding to mono float PCM, including 16-bit and float decoder output, then an anti-aliased resample to 22.05 kHz.
-  - Constant-Q chromagram, one kernel per semitone from C2 to C7, so guitar harmonics are not over-weighted the way a raw FFT bin sum is.
-  - Chord template matching by centered (Pearson) correlation, decoded with Viterbi over the whole track. Each chord change costs a fixed penalty (0.9), and a new chord is kept only when its lead, summed over every frame it lasts, pays that off. Sustained changes land on the frame where the evidence flips; near-ties and passing tones never add up.
-  - Two passes: the first pass's chords give the song's key (the key whose chords cover the most playing time, which is also the key shown in the app). The second pass gives in-key chords a small head start (0.05), so thin passages stop guessing out-of-key chords.
-  - Each frame's evidence is weighted by how clearly it holds a chord, so thin passages need longer to change and stop flickering, while clearly played quick changes still switch at the normal cost.
-  - The no-chord cutoff is 0.25 on the centered score (desktop's 0.35 is a cosine score and would blank out chords in a full mix). Silence RMS (0.015), hop (1024) and minimum segment (0.10 s) match the desktop app, and a 3-frame chroma median removes single-frame flicker.
-- **Studio Dark Aesthetic:**
-  - **Rosewood Guitar Fretboard:** Hardware-accelerated canvas rendering with nickel frets, mother-of-pearl position inlays (3rd, 5th, 7th, 9th, 12th double-dot), brass/bronze wound strings, gold finger dot markers, and muted/open string status badges.
-  - **Acoustic Strum Synthesizer:** Tap the fretboard or chord badge to hear a physical plucked-string Karplus-Strong / harmonic acoustic strum synthesized in real-time via `AudioTrack`.
-  - **Mirrored Audio Waveform Timeline:** Interactive scrubbing timeline displaying synchronized chord blocks and laser playhead.
-  - **HUD Transport Bar:** Big chord readout, upcoming chord countdown timer, playback controls, loop region, and tempo speed multiplier (0.5x, 0.75x, 1.0x, 1.25x).
-  - **Lead Sheet Grid:** 4-chord measure layout highlighting the active chord bar in real-time.
-  - **Transposition & Capo:** Transpose chords on the fly (±11 semitones) or set a capo position with automatically updated fingering diagrams.
-- **Modern Android Architecture:**
-  - 100% Jetpack Compose UI (no XML layouts).
-  - Media3 ExoPlayer integration for seamless playback.
-  - Kotlin Coroutines & Flow for asynchronous audio decoding and DSP processing.
-  - System file picker (`ActivityResultContracts.GetContent`) + Intent filter to handle "Open with ChordScout" from file managers.
-
----
-
-## 📱 Screenshots & Architecture
+## Architecture & Execution Pipeline
 
 ```
-com.paulkircher.chordscout
-├── dsp/
-│   ├── FastFourierTransform.kt  # Radix-2 Cooley-Tukey FFT
-│   ├── ChromaExtractor.kt       # Constant-Q 12-pitch chromagram
-│   ├── ChordAnalyzer.kt         # Template matching, key estimation & smoothing
-│   └── GuitarSynth.kt           # Karplus-Strong acoustic guitar strum
-├── audio/
-│   ├── AudioDecoder.kt          # MediaExtractor + MediaCodec to FloatArray
-│   ├── PcmConvert.kt            # 16-bit and float PCM downmix
-│   └── PcmResampler.kt          # Anti-aliased resample to 22.05 kHz
-├── ui/
-│   ├── theme/                   # Studio dark theme, Amber/Gold accents
-│   ├── RosewoodFretboard.kt     # Canvas-drawn guitar fretboard & markers
-│   ├── WaveformTimeline.kt      # Mirrored waveform & chord timeline
-│   ├── HudTransportBar.kt       # Transport HUD & upcoming chord countdown
-│   ├── LeadSheetGrid.kt         # 4-chord measure progression grid
-│   └── DropHeroView.kt          # Empty-state file picker & bundled demo
-└── MainActivity.kt              # ExoPlayer controller & state management
+  Local Audio URI (Picker / ACTION_VIEW / ACTION_SEND) or Bundled Asset (demo_song.mp3)
+                                       │
+                                       ▼
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │ 1. Audio Decode & Resample (com.paulkircher.chordscout.audio)                     │
+ │    • AudioDecoder.decodeToMonoPcm: MediaExtractor + MediaCodec -> PCM chunks      │
+ │      (enforces MAX_DECODE_SECONDS = 900s ceiling and bounded output EOS drain)    │
+ │    • PcmConvert.toMono: 8/16/24/32-bit int or 32-bit float -> mono FloatArray     │
+ │    • PcmResampler.resample: 49-tap Hann-windowed sinc filter -> 22,050 Hz mono    │
+ └───────────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │ 2. Constant-Q Chromagram & Viterbi Chord Analysis (com.paulkircher.chordscout.dsp)│
+ │    • Peak-normalizes PCM in-place (when peak >= 1e-5f and |peak - 1f| >= 1e-4f)   │
+ │    • ChromaExtractor.extractChromagram: 61 Hann-windowed CQT kernels (C2..C7,     │
+ │      MIDI 36..96), hopSize = 1024 (~46.4 ms), log1p compression + L2 norm         │
+ │    • 3-frame temporal median filter per pitch class (CHROMA_MEDIAN_WIDTH = 3)     │
+ │    • Mean-centered Pearson correlation against L2-normalized chord templates      │
+ │    • Pass 1 Viterbi decode (SWITCH_PENALTY = 0.9, CLARITY_POWER = 2.0)            │
+ │    • Key estimation from Pass 1 diatonic coverage (ChordAnalyzer.keyFromChords),  │
+ │      falling back to Krumhansl-Schmuckler global chroma correlation (estimateKey) │
+ │    • Pass 2 Viterbi decode with diatonic key bonus (KEY_BONUS = 0.05)             │
+ │    • Segment merging (duration-weighted confidence) & micro-segment absorption    │
+ └───────────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │ 3. Synchronized Practice UI (MainActivity + com.paulkircher.chordscout.ui)        │
+ │    • Media3 ExoPlayer with audio focus management & Player.Listener state sync    │
+ │    • WaveformTimeline: color-coded chord blocks + tap-to-seek playhead laser      │
+ │    • HudTransportBar: active/upcoming chord countdown, key, loop & speed          │
+ │    • RosewoodFretboard / LeadSheetGrid + GuitarSynth additive harmonic preview    │
+ └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+## Build & Verification
 
-## 🛠️ Building & Running
+Requires JDK `17` and Android SDK Platform `35` (`build-tools;35.0.0`).
 
-### Requirements
-- Android SDK 35 (`minSdk = 26`, `targetSdk = 35`)
-- JDK 17 (e.g. Eclipse Temurin 17)
-- Gradle 8.11.1 (via included wrapper)
+- **[build.gradle.kts:plugins]**: Root Gradle build script declaring Android Application (`8.9.2`), Kotlin Android (`2.1.20`), and Kotlin Compose (`2.1.20`) plugins.
+- **[settings.gradle.kts:rootProject]**: Configures Google/MavenCentral repositories and includes `:app` (`rootProject.name = "ChordScoutAndroid"`).
+- **[gradle.properties:org.gradle.jvmargs]**: Sets `-Xmx3g -Dfile.encoding=UTF-8`, `android.useAndroidX=true`, `kotlin.code.style=official`, and `android.nonTransitiveRClass=true`.
+- **[.github/workflows/android-debug.yml:build]**: GitHub Actions workflow (`Android Debug APK`) running on `ubuntu-24.04` with Temurin JDK `17` and Android SDK `35` that executes `:app:assembleDebug :app:testDebugUnitTest` and uploads the debug APK and unit test reports.
 
-### Build Debug APK
-
-For a GitHub build, open **Actions → Android Debug APK → Run workflow**.
-The workflow also runs for pushes and pull requests to `main`. Successful runs
-provide a `chordscout-android-debug-<run number>` artifact containing the debug APK
-(retained for 30 days), plus unit-test reports. Download and unzip the artifact
-to install the APK. This is a debug build, not a Play Store release.
+Run the JUnit 4 unit test suite and assemble the debug APK from the repository root:
 
 ```bash
-./gradlew assembleDebug
-```
-The APK will be generated at `app/build/outputs/apk/debug/app-debug.apk`.
-
-### Run Unit Tests
-```bash
-./gradlew test
+./gradlew --no-daemon --stacktrace :app:testDebugUnitTest :app:assembleDebug
 ```
 
-### Install onto Connected Device / Emulator
-```bash
-./gradlew installDebug
-```
+## System Invariants
 
----
+- **Offline Execution**: Zero network permissions (`INTERNET` is not declared in `[app/src/main/AndroidManifest.xml:manifest]`). All decoding, resampling, constant-Q chromagram extraction, Viterbi chord recognition, and guitar synthesis run locally on-device.
+- **Native Resource Lifecycle**:
+  - `[AudioDecoder.kt:AudioDecoder]` wraps `MediaExtractor` in `try / finally { extractor.release() }`, wraps `MediaCodec` in `try / finally { try { codec.stop() } catch (_: Exception) {}; codec.release() }`, checks `ensureActive()` inside the decode loop, bounds post-EOS output draining (`MAX_EMPTY_DRAIN_TRIES = 500`), enforces a 15-minute track ceiling (`MAX_DECODE_SECONDS = 900`), clears each chunk slot during compaction, and executes `PcmResampler.resample` inside `runInterruptible`.
+  - `[MainActivity.kt:MainActivity]` configures `ExoPlayer` with `AudioAttributes.DEFAULT` (`handleAudioFocus = true`), pauses `exoPlayer` and releases `[GuitarSynth.kt:GuitarSynth]` in `onStop()`, and releases both `GuitarSynth` and `exoPlayer` in `onDestroy()`.
+  - `[MainActivity.kt:MainScreen]` tracks `analysisJob` and cancels any in-flight analysis before launching a new one, executing `[ChordAnalyzer.kt:ChordAnalyzer]` inside `runInterruptible(Dispatchers.Default)` with structured, throttled, strictly monotonic progress updates (`0.05f..0.40f` decode, `0.45f` chromagram, `0.70f` key/chord matching, `0.90f` smoothing, `1.0f` done).
+- **Locale-Deterministic Formatting**: Timestamp and countdown formatters (`[ChordSegment.kt:ChordSegment]`, `[HudTransportBar.kt:HudTransportBar]`) explicitly pass `Locale.US` so decimal separators remain `.` regardless of device locale, and `ChordSegment.formatTimestamp` rounds tenths of a second before splitting minutes so values in `[59.95f, 60.0f)` format as `"01:00.0"`.
+- **Harmonic & Temporal Stability**:
+  - Downsampling to `22050 Hz` must use `[PcmResampler.kt:PcmResampler]` (Hann-windowed sinc anti-aliasing filter) rather than linear interpolation so high-frequency pick attack and string noise do not alias into the constant-Q chord band.
+  - `[ChordAnalyzer.kt:ChordAnalyzer]` produces contiguous, non-overlapping `[ChordSegment.kt:ChordSegment]` lists spanning `[0f, totalDuration]` with duration-weighted confidence and micro-segments shorter than `MIN_SEGMENT_DURATION` (`0.10f` s) absorbed into neighbors.
 
-## 📄 License
+## Subdirectory Map
 
-GPL-3.0 License. See [LICENSE](LICENSE) for details.
+- [./app/README.md](./app/README.md): `:app` Android application module build configuration, ProGuard rules, and source/test tree map.
+  - [./app/src/main/README.md](./app/src/main/README.md): Main application manifest (`AndroidManifest.xml`), bundled demo asset (`assets/demo_song.mp3`), Android resources (`res/`), and Kotlin package root.
+    - [./app/src/main/java/com/paulkircher/chordscout/README.md](./app/src/main/java/com/paulkircher/chordscout/README.md): Application entry point (`MainActivity`, `MainScreen`, `extractAudioUri`, `resolveDisplayName`) and subpackage map.
+      - [./app/src/main/java/com/paulkircher/chordscout/audio/README.md](./app/src/main/java/com/paulkircher/chordscout/audio/README.md): Audio decoding (`AudioDecoder`), multi-bit PCM-to-mono conversion (`PcmConvert`), and windowed-sinc resampling (`PcmResampler`).
+      - [./app/src/main/java/com/paulkircher/chordscout/dsp/README.md](./app/src/main/java/com/paulkircher/chordscout/dsp/README.md): Constant-Q chromagram extraction (`ChromaExtractor`), two-pass key-aware Viterbi chord analysis (`ChordAnalyzer`), and additive guitar synthesis (`GuitarSynth`).
+      - [./app/src/main/java/com/paulkircher/chordscout/model/README.md](./app/src/main/java/com/paulkircher/chordscout/model/README.md): Domain models (`AnalysisResult`, `SongMetadata`, `ChordSegment`, `GuitarChord`) and the 48-voicing `GuitarChordLibrary`.
+      - [./app/src/main/java/com/paulkircher/chordscout/ui/README.md](./app/src/main/java/com/paulkircher/chordscout/ui/README.md): Jetpack Compose UI layer map (`components` and `theme`).
+        - [./app/src/main/java/com/paulkircher/chordscout/ui/components/README.md](./app/src/main/java/com/paulkircher/chordscout/ui/components/README.md): Compose UI components (`DropHeroView`, `WaveformTimeline`, `HudTransportBar`, `RosewoodFretboard`, `LeadSheetGrid`).
+        - [./app/src/main/java/com/paulkircher/chordscout/ui/theme/README.md](./app/src/main/java/com/paulkircher/chordscout/ui/theme/README.md): Material 3 dark theme (`ChordScoutTheme`) and root-pitch color mapping (`getChordColor`).
+  - [./app/src/test/java/com/paulkircher/chordscout/README.md](./app/src/test/java/com/paulkircher/chordscout/README.md): JUnit 4 unit test suite (`ChordAnalyzerTest`, `PcmResamplerTest`) verifying CQT chromagrams, Viterbi chord recognition, key detection, resampler anti-aliasing, model utilities, and multi-bit PCM conversion.

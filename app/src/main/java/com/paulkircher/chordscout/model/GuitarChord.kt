@@ -13,12 +13,16 @@ data class GuitarChord(
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
         other as GuitarChord
-        return name == other.name && frets.contentEquals(other.frets) && baseFret == other.baseFret
+        return name == other.name &&
+            frets.contentEquals(other.frets) &&
+            fingers.contentEquals(other.fingers) &&
+            baseFret == other.baseFret
     }
 
     override fun hashCode(): Int {
         var result = name.hashCode()
         result = 31 * result + frets.contentHashCode()
+        result = 31 * result + fingers.contentHashCode()
         result = 31 * result + baseFret
         return result
     }

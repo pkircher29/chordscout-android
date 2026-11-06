@@ -173,12 +173,12 @@ object ChordAnalyzer {
         onProgress: (Float, String) -> Unit = { _, _ -> },
     ): AnalysisResult {
         val totalSec = pcm.size.toFloat() / sampleRate
-        onProgress(0.15f, "Extracting chromagram...")
+        onProgress(0.45f, "Extracting chromagram...")
 
         // Desktop peak-normalizes before the log chroma. Without this, a quiet
         // phone recording stays in the linear part of log1p and the loudest
         // partial decides the chord.
-        peakNormalize(pcm)
+        peakNormalize(pcm, silenceRmsThreshold)
 
         val extractor = ChromaExtractor(sampleRate = sampleRate, windowSize = 2048, hopSize = 1024)
         val chromagram = medianSmoothChroma(extractor.extractChromagram(pcm), chromaMedianWidth)
@@ -188,14 +188,7 @@ object ChordAnalyzer {
             return AnalysisResult(emptyMeta, listOf(ChordSegment(0f, totalSec, "N", 1.0f)))
         }
 
-        onProgress(0.50f, "Estimating song key & matching chords...")
-
-        // Compute global mean chroma for key estimation
-        val globalChroma = FloatArray(12)
-        for (vec in chromagram) {
-            for (i in 0 until 12) globalChroma[i] += vec[i]
-        }
-        val estimatedKey = estimateKey(globalChroma)
+        onProgress(0.70f, "Estimating song key & matching chords...")
 
         val templates = buildChordTemplates(includeSevenths)
         val chordNames = templates.keys.toTypedArray()
@@ -258,39 +251,50 @@ object ChordAnalyzer {
             }
         }
 
-        onProgress(0.85f, "Consolidating segments...")
+        onProgress(0.90f, "Consolidating segments...")
         val smoothed = mergeAndSmooth(rawSegments, totalSec, minSegmentDuration = minSegmentDuration)
+
+        val resolvedKey = if (songKey != null) {
+            keyName(songKey.first, songKey.second)
+        } else {
+            val globalChroma = FloatArray(12)
+            for (vec in chromagram) {
+                for (i in 0 until 12) globalChroma[i] += vec[i]
+            }
+            estimateKey(globalChroma)
+        }
 
         onProgress(1.0f, "Done")
         val metadata = SongMetadata(
             fileName = fileName,
             durationSeconds = totalSec,
             sampleRate = sampleRate,
-            tempoBpm = 120f,
-            estimatedKey = songKey?.let { keyName(it.first, it.second) } ?: estimatedKey,
+            estimatedKey = resolvedKey,
         )
         return AnalysisResult(metadata, smoothed)
     }
 
-    /**
-     * Mean-removed, unit-length copy. Log-compressed constant-Q chroma has a
-     * high floor in every bin, so plain cosine puts C at 0.62 and Cm at 0.59
-     * on a clean C triad. Centering both sides scores the shape instead of
-     * the floor (Pearson correlation) and spreads those apart.
-     */
-    /** Root pitch class and minor flag of a chord name ("F#m7" -> 6, true). */
-    private fun parseChord(name: String): Pair<Int, Boolean>? {
+    /** Root pitch class, minor flag, and dominant-7th flag of a chord name ("F#m7" -> Triple(6, true, false)). */
+    private fun parseChord(name: String): Triple<Int, Boolean, Boolean>? {
+        if (name.isEmpty()) return null
         val rootName = if (name.length > 1 && name[1] == '#') name.substring(0, 2) else name.substring(0, 1)
         val root = PITCH_NAMES.indexOf(rootName)
         if (root < 0) return null
-        return root to name.substring(rootName.length).startsWith("m")
+        val suffix = name.substring(rootName.length)
+        val minor = suffix.startsWith("m")
+        val dom7 = !minor && suffix == "7"
+        return Triple(root, minor, dom7)
     }
 
-    /** True if [chord] is I, IV, V (major) or ii, iii, vi (minor) of [tonic] major. */
+    /** True if [chord] is I, IV, V (major), V7 (dominant 7th), or ii, iii, vi (minor / m7) of [tonic] major. */
     fun isDiatonic(chord: String, tonic: Int): Boolean {
-        val (root, minor) = parseChord(chord) ?: return false
+        val (root, minor, dom7) = parseChord(chord) ?: return false
         val degree = (root - tonic + 12) % 12
-        return if (minor) degree == 2 || degree == 4 || degree == 9 else degree == 0 || degree == 5 || degree == 7
+        return when {
+            minor -> degree == 2 || degree == 4 || degree == 9
+            dom7 -> degree == 7
+            else -> degree == 0 || degree == 5 || degree == 7
+        }
     }
 
     /**
@@ -300,8 +304,9 @@ object ChordAnalyzer {
      */
     fun keyFromChords(path: IntArray, chordNames: Array<String>): Pair<Int, Boolean>? {
         val frames = IntArray(chordNames.size)
-        for (state in path) if (state < chordNames.size) frames[state]++
+        for (state in path) if (state in frames.indices) frames[state]++
         if (frames.sum() < 43) return null
+        fun countFor(name: String): Int = chordNames.indexOf(name).let { if (it in frames.indices) frames[it] else 0 }
         var bestTonic = 0
         var bestCover = -1
         for (tonic in 0 until 12) {
@@ -309,15 +314,16 @@ object ChordAnalyzer {
             for (c in chordNames.indices) if (isDiatonic(chordNames[c], tonic)) cover += frames[c]
             // A tie (keys a fifth apart share four chords) goes to the key
             // whose I or vi chord is actually heard more.
-            cover = cover * 4 + frames[chordNames.indexOf(PITCH_NAMES[tonic])] +
-                frames[chordNames.indexOf("${PITCH_NAMES[(tonic + 9) % 12]}m")]
+            val relName = PITCH_NAMES[(tonic + 9) % 12]
+            cover = cover * 4 + countFor(PITCH_NAMES[tonic]) + countFor("${relName}m") + countFor("${relName}m7")
             if (cover > bestCover) {
                 bestCover = cover
                 bestTonic = tonic
             }
         }
-        val major = frames[chordNames.indexOf(PITCH_NAMES[bestTonic])]
-        val relMinor = frames[chordNames.indexOf("${PITCH_NAMES[(bestTonic + 9) % 12]}m")]
+        val major = countFor(PITCH_NAMES[bestTonic])
+        val relName = PITCH_NAMES[(bestTonic + 9) % 12]
+        val relMinor = countFor("${relName}m") + countFor("${relName}m7")
         // Only the name depends on this (both share the same chords), and a
         // near-even split is usually a major song visiting vi.
         return bestTonic to (relMinor > major * 5 / 4)
@@ -326,6 +332,12 @@ object ChordAnalyzer {
     private fun keyName(tonic: Int, minor: Boolean): String =
         if (minor) "${PITCH_NAMES[(tonic + 9) % 12]} minor" else "${PITCH_NAMES[tonic]} major"
 
+    /**
+     * Mean-removed, unit-length copy. Log-compressed constant-Q chroma has a
+     * high floor in every bin, so plain cosine puts C at 0.62 and Cm at 0.59
+     * on a clean C triad. Centering both sides scores the shape instead of
+     * the floor (Pearson correlation) and spreads those apart.
+     */
     private fun centered(vec: FloatArray): FloatArray {
         val mean = vec.sum() / vec.size
         return normalize(FloatArray(vec.size) { vec[it] - mean })
@@ -371,13 +383,13 @@ object ChordAnalyzer {
         return path
     }
 
-    private fun peakNormalize(pcm: FloatArray) {
+    private fun peakNormalize(pcm: FloatArray, minPeakFloor: Float = 1e-3f) {
         var peak = 0f
         for (sample in pcm) {
             val magnitude = abs(sample)
             if (magnitude > peak) peak = magnitude
         }
-        if (peak < 1e-5f || abs(peak - 1f) < 1e-4f) return
+        if (peak < max(1e-5f, minPeakFloor) || abs(peak - 1f) < 1e-4f) return
         val gain = 1f / peak
         for (i in pcm.indices) pcm[i] *= gain
     }
@@ -426,6 +438,31 @@ object ChordAnalyzer {
         return smoothedFrames
     }
 
+    private fun mergeAdjacent(segments: List<ChordSegment>): ArrayList<ChordSegment> {
+        val merged = ArrayList<ChordSegment>()
+        if (segments.isEmpty()) return merged
+        var current = segments[0].copy()
+        for (i in 1 until segments.size) {
+            val next = segments[i]
+            if (next.chord == current.chord) {
+                val curDur = current.duration
+                val nxtDur = next.duration
+                val totalDur = curDur + nxtDur
+                val avgConf = if (totalDur > 1e-6f) {
+                    (curDur * current.confidence + nxtDur * next.confidence) / totalDur
+                } else {
+                    max(current.confidence, next.confidence)
+                }
+                current = current.copy(endTime = next.endTime, confidence = avgConf)
+            } else {
+                merged.add(current)
+                current = next.copy()
+            }
+        }
+        merged.add(current)
+        return merged
+    }
+
     private fun mergeAndSmooth(
         raw: List<ChordSegment>,
         totalDuration: Float,
@@ -434,19 +471,7 @@ object ChordAnalyzer {
         if (raw.isEmpty()) return listOf(ChordSegment(0f, totalDuration, "N", 1.0f))
 
         // 1. Merge adjacent identical chords
-        val merged = ArrayList<ChordSegment>()
-        var current = raw[0].copy()
-
-        for (i in 1 until raw.size) {
-            val next = raw[i]
-            if (next.chord == current.chord) {
-                current = current.copy(endTime = next.endTime)
-            } else {
-                merged.add(current)
-                current = next.copy()
-            }
-        }
-        merged.add(current)
+        val merged = mergeAdjacent(raw)
 
         // 2. Absorb micro segments
         val cleaned = ArrayList<ChordSegment>()
@@ -469,20 +494,7 @@ object ChordAnalyzer {
         }
 
         // 3. Re-merge adjacent identical formed by absorption
-        val finalSegments = ArrayList<ChordSegment>()
-        if (cleaned.isNotEmpty()) {
-            var cur = cleaned[0]
-            for (j in 1 until cleaned.size) {
-                val nxt = cleaned[j]
-                if (nxt.chord == cur.chord) {
-                    cur = cur.copy(endTime = nxt.endTime)
-                } else {
-                    finalSegments.add(cur)
-                    cur = nxt
-                }
-            }
-            finalSegments.add(cur)
-        }
+        val finalSegments = mergeAdjacent(cleaned)
 
         // 4. Enforce exact bounds [0, totalDuration]
         if (finalSegments.isNotEmpty()) {

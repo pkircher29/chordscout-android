@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.paulkircher.chordscout.model.ChordSegment
 import com.paulkircher.chordscout.ui.theme.*
+import kotlin.math.roundToInt
 
 @Composable
 fun LeadSheetGrid(
@@ -45,7 +46,7 @@ fun LeadSheetGrid(
                     .background(if (isActive) Color(0xFF1E283D) else Color(0xFF151A27))
                     .border(
                         width = if (isActive) 2.dp else 1.dp,
-                        color = if (isActive) AccentAmber else BorderSubtle,
+                        color = if (isActive) AccentAmber else baseCol.copy(alpha = 0.45f),
                         shape = RoundedCornerShape(8.dp),
                     )
                     .clickable { onSegmentSelected(idx, seg.startTime) }
@@ -71,7 +72,7 @@ fun LeadSheetGrid(
 
                 // Bottom confidence
                 Text(
-                    text = "${(seg.confidence * 100).toInt()}%",
+                    text = "${(seg.confidence * 100).roundToInt()}%",
                     color = TextMuted,
                     fontSize = 8.sp,
                     modifier = Modifier.align(Alignment.BottomEnd),

@@ -6,9 +6,12 @@ import android.media.AudioTrack
 import com.paulkircher.chordscout.model.GuitarChord
 import com.paulkircher.chordscout.model.GuitarChordLibrary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.pow
 import kotlin.math.sin
 
 object GuitarSynth {
@@ -17,8 +20,11 @@ object GuitarSynth {
     private const val SAMPLE_RATE = 44100
 
     private var currentTrack: AudioTrack? = null
+    @Volatile
+    private var releaseGeneration: Long = 0L
 
     suspend fun playChord(chord: GuitarChord, durationSec: Float = 1.5f) = withContext(Dispatchers.Default) {
+        val startGen = releaseGeneration
         val numSamples = (SAMPLE_RATE * durationSec).toInt()
         val waveform = FloatArray(numSamples)
         val strumDelaySec = 0.032f
@@ -28,7 +34,7 @@ object GuitarSynth {
             if (fret < 0) continue
 
             val baseHz = STANDARD_TUNING_HZ[sIdx]
-            val freq = baseHz * Math.pow(2.0, fret / 12.0).toFloat()
+            val freq = baseHz * 2.0.pow(fret / 12.0).toFloat()
 
             val delaySamples = (sIdx * strumDelaySec * SAMPLE_RATE).toInt()
             val stringSamples = numSamples - delaySamples
@@ -53,7 +59,7 @@ object GuitarSynth {
         // Normalize
         var maxPeak = 0.0f
         for (v in waveform) {
-            val absV = Math.abs(v)
+            val absV = abs(v)
             if (absV > maxPeak) maxPeak = absV
         }
         if (maxPeak > 1e-5f) {
@@ -62,10 +68,9 @@ object GuitarSynth {
         }
 
         withContext(Dispatchers.Main) {
-            try {
-                currentTrack?.stop()
-                currentTrack?.release()
-            } catch (_: Exception) {}
+            ensureActive()
+            if (startGen != releaseGeneration) return@withContext
+            release()
 
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
@@ -85,14 +90,31 @@ object GuitarSynth {
                 .setTransferMode(AudioTrack.MODE_STATIC)
                 .build()
 
-            track.write(waveform, 0, numSamples, AudioTrack.WRITE_BLOCKING)
-            track.play()
-            currentTrack = track
+            if (track.state == AudioTrack.STATE_INITIALIZED) {
+                track.write(waveform, 0, numSamples, AudioTrack.WRITE_BLOCKING)
+                track.play()
+                currentTrack = track
+            } else {
+                track.release()
+            }
         }
     }
 
     suspend fun playChord(chordName: String) {
         val gc = GuitarChordLibrary.getChord(chordName) ?: return
         playChord(gc)
+    }
+
+    fun release() {
+        releaseGeneration++
+        try {
+            currentTrack?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            currentTrack?.release()
+        } catch (_: Exception) {
+        }
+        currentTrack = null
     }
 }

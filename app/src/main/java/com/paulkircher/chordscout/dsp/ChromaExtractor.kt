@@ -84,6 +84,9 @@ class ChromaExtractor(
         val chromagram = ArrayList<FloatArray>(numFrames)
 
         for (frame in 0 until numFrames) {
+            if ((frame and 31) == 0 && Thread.interrupted()) {
+                throw InterruptedException("Chromagram extraction interrupted")
+            }
             val center = frameCenter(frame)
             val chroma = FloatArray(12)
             for (kernel in kernels) {

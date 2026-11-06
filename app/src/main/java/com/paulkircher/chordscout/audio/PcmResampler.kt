@@ -28,6 +28,9 @@ object PcmResampler {
 
         val output = FloatArray(outLength)
         for (i in 0 until outLength) {
+            if ((i and 4095) == 0 && Thread.interrupted()) {
+                throw InterruptedException("Resampling interrupted")
+            }
             val sourcePos = i * step
             val origin = floor(sourcePos).toInt()
             var acc = 0.0

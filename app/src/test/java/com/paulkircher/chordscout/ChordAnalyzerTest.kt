@@ -2,10 +2,17 @@ package com.paulkircher.chordscout
 
 import com.paulkircher.chordscout.dsp.ChordAnalyzer
 import com.paulkircher.chordscout.dsp.ChromaExtractor
+import com.paulkircher.chordscout.model.AnalysisResult
 import com.paulkircher.chordscout.model.ChordSegment
+import com.paulkircher.chordscout.model.GuitarChord
 import com.paulkircher.chordscout.model.GuitarChordLibrary
+import com.paulkircher.chordscout.model.SongMetadata
+import com.paulkircher.chordscout.ui.theme.AccentCyan
+import com.paulkircher.chordscout.ui.theme.getChordColor
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.PI
@@ -29,6 +36,12 @@ class ChordAnalyzerTest {
         assertTrue(cVec[0] > 0) // C root
         assertTrue(cVec[4] > 0) // E (major 3rd)
         assertTrue(cVec[7] > 0) // G (5th)
+
+        val templatesWith7ths = ChordAnalyzer.buildChordTemplates(includeSevenths = true)
+        assertEquals(48, templatesWith7ths.size)
+        for (name in templatesWith7ths.keys) {
+            assertNotNull("GuitarChordLibrary must have a voicing for $name", GuitarChordLibrary.getChord(name))
+        }
     }
 
     @Test
@@ -41,10 +54,56 @@ class ChordAnalyzerTest {
         assertNotNull(am)
         assertEquals("x 0 2 2 1 0", am!!.stringDisplay)
 
-        // Enharmonic Db -> C#
-        val db = GuitarChordLibrary.getChord("Db")
-        assertNotNull(db)
-        assertEquals(4, db!!.baseFret)
+        // Enharmonic flat lookups across major, minor, 7, and m7
+        for (flat in listOf("Db", "Eb", "Gb", "Ab", "Bb", "Dbm", "Ebm", "Gbm", "Abm", "Bbm", "Db7", "Ebm7")) {
+            val resolved = GuitarChordLibrary.getChord(flat)
+            assertNotNull("Enharmonic $flat should resolve", resolved)
+            assertEquals(flat, resolved!!.name)
+        }
+
+        assertNull(GuitarChordLibrary.getChord("N"))
+        assertNull(GuitarChordLibrary.getChord("   "))
+        assertNull(GuitarChordLibrary.getChord("Hmaj9"))
+
+        val custom1 = GuitarChord("C", intArrayOf(-1, 3, 2, 0, 1, 0), intArrayOf(0, 3, 2, 0, 1, 0), 1)
+        val custom2 = GuitarChord("C", intArrayOf(-1, 3, 2, 0, 1, 0), intArrayOf(0, 4, 2, 0, 1, 0), 1)
+        assertEquals(c, custom1)
+        assertEquals(c.hashCode(), custom1.hashCode())
+        assertNotEquals(c, custom2)
+    }
+
+    @Test
+    fun testModelTimestampsAndLookupAndThemeColors() {
+        assertEquals("00:00.0", ChordSegment.formatTimestamp(-2.5f))
+        assertEquals("00:05.3", ChordSegment.formatTimestamp(5.34f))
+        assertEquals("01:00.0", ChordSegment.formatTimestamp(59.96f))
+        assertEquals("01:05", ChordSegment.formatTimestamp(65.9f, includeMs = false))
+
+        val seg1 = ChordSegment(0f, 2f, "C", 0.9f)
+        val seg2 = ChordSegment(2f, 4f, "G", 0.8f)
+        assertEquals(2f, seg1.duration, 1e-5f)
+        assertEquals("00:00.0", seg1.formattedStartTime)
+        assertEquals("00:02.0", seg1.formattedEndTime)
+
+        val result = AnalysisResult(SongMetadata("test.wav", 4f), listOf(seg1, seg2))
+        assertEquals(seg1, result.getChordAtTime(0f))
+        assertEquals(seg1, result.getChordAtTime(1.5f))
+        assertEquals(seg2, result.getChordAtTime(2.0f))
+        assertEquals(seg2, result.getChordAtTime(10.0f))
+        assertNull(AnalysisResult(SongMetadata("empty.wav", 0f), emptyList()).getChordAtTime(0f))
+
+        assertEquals(0xFF1E2330, getChordColor("N").value.toLong() shr 32 and 0xFFFFFFFFL)
+        assertEquals(AccentCyan, getChordColor("—"))
+    }
+
+    @Test
+    fun testAnalyzeShortAndSilentBuffers() {
+        val shortRes = ChordAnalyzer.analyze(FloatArray(512), sampleRate = 22050, fileName = "short.wav")
+        assertEquals(1, shortRes.segments.size)
+        assertEquals("N", shortRes.segments[0].chord)
+
+        val silentRes = ChordAnalyzer.analyze(FloatArray(22050), sampleRate = 22050, fileName = "silent.wav")
+        assertEquals(listOf("N"), silentRes.segments.map { it.chord })
     }
 
     @Test
@@ -338,7 +397,7 @@ class ChordAnalyzerTest {
     @Test
     fun testDiatonicChords() {
         val inC = listOf("C", "Dm", "Em", "F", "G", "Am", "G7", "Am7")
-        val outOfC = listOf("Cm", "D", "E", "Fm", "A#", "Bm", "C#")
+        val outOfC = listOf("Cm", "D", "E", "Fm", "A#", "Bm", "C#", "C7", "F7")
         inC.forEach { assertTrue("$it is in C", ChordAnalyzer.isDiatonic(it, 0)) }
         outOfC.forEach { assertTrue("$it is not in C", !ChordAnalyzer.isDiatonic(it, 0)) }
     }

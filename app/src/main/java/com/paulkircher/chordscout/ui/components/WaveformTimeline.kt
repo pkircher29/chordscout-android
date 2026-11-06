@@ -7,6 +7,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -15,7 +16,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.paulkircher.chordscout.model.ChordSegment
+import com.paulkircher.chordscout.ui.theme.AccentAmber
 import com.paulkircher.chordscout.ui.theme.BorderSubtle
 import com.paulkircher.chordscout.ui.theme.getChordColor
 
@@ -27,6 +30,15 @@ fun WaveformTimeline(
     onSeek: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val labelPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.WHITE
+            textAlign = android.graphics.Paint.Align.CENTER
+            isFakeBoldText = true
+            isAntiAlias = true
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -45,6 +57,7 @@ fun WaveformTimeline(
             val w = size.width
             val h = size.height
             val dur = maxOf(0.1f, durationSeconds)
+            labelPaint.textSize = 11.sp.toPx()
 
             // 1. Draw Chord Segment Blocks
             for (seg in segments) {
@@ -76,12 +89,7 @@ fun WaveformTimeline(
                         seg.chord,
                         x1 + (segW / 2f),
                         (h / 2f) + 4.dp.toPx(),
-                        android.graphics.Paint().apply {
-                            color = android.graphics.Color.WHITE
-                            textSize = 28f
-                            textAlign = android.graphics.Paint.Align.CENTER
-                            isFakeBoldText = true
-                        }
+                        labelPaint,
                     )
                 }
             }
@@ -89,7 +97,7 @@ fun WaveformTimeline(
             // 2. Playhead Laser
             val playX = (currentPlaybackSeconds / dur) * w
             drawLine(
-                color = Color(0xFFF59E0B),
+                color = AccentAmber,
                 start = Offset(playX, 0f),
                 end = Offset(playX, h),
                 strokeWidth = 2.5f.dp.toPx(),

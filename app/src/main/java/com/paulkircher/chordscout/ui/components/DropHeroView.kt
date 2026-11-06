@@ -35,7 +35,7 @@ fun DropHeroView(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF131722))
+                .background(BgPanel)
                 .border(2.dp, BorderMedium, RoundedCornerShape(16.dp))
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -52,7 +52,7 @@ fun DropHeroView(
             )
 
             Text(
-                "Extract time-aligned guitar chords, visual fretboard fingerings, and practice tools from local MP3, WAV, FLAC, or M4A audio files.",
+                "Extract time-aligned guitar chords, visual fretboard fingerings, and practice tools from local MP3, WAV, FLAC, M4A, or OGG audio files.",
                 color = TextSecondary,
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center,
@@ -65,7 +65,7 @@ fun DropHeroView(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF1E2638))
+                            .background(BorderSubtle)
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                     ) {
                         Text(fmt, color = AccentCyan, fontSize = 10.sp, fontWeight = FontWeight.Bold)
